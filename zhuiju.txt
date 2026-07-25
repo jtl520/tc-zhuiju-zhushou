@@ -3674,7 +3674,7 @@
         let manualMode = false;
         const root = createShell({
             title: '天虫',
-            subtitle: `${mediaInfo.platform} · 已识别当前页面`,
+            subtitle: '已识别当前页面',
             value: mediaInfo.query,
             routes: AUTHORIZED_ROUTES,
             settings
@@ -3757,7 +3757,7 @@
             input.placeholder = mediaInfo.title || '输入片名或节目名';
             input.title = mediaInfo.title || '';
             indexNumber.placeholder = mediaInfo.episodeNumber || '序号';
-            subtitle.textContent = `${mediaInfo.platform} · 实时识别中`;
+            subtitle.textContent = '实时识别中';
         }
 
         function updateDefaultButton() {
