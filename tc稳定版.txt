@@ -1,0 +1,2033 @@
+// ==UserScript==
+// @name         天虫追剧助手
+// @namespace    https://github.com/local/tianchong-video-navigator
+// @version      1.8.0
+// @description  从主流视频页面提取片名与集数，并辅助在目标站搜索；不绕过会员、验证码或反机器人验证。
+// @author       jtl66
+// @match        https://v.qq.com/*
+// @match        https://m.v.qq.com/*
+// @match        https://www.iqiyi.com/*
+// @match        https://m.iqiyi.com/*
+// @match        https://v.youku.com/*
+// @match        https://www.youku.com/*
+// @match        https://m.youku.com/*
+// @match        https://www.mgtv.com/*
+// @match        https://m.mgtv.com/*
+// @match        https://www.bilibili.com/*
+// @match        https://m.bilibili.com/*
+// @match        https://www.iyf.tv/*
+// @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_openInTab
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const APP_ID = 'tc-video-helper';
+    const TARGET_HOST = 'www.iyf.tv';
+    const TARGET_HOME = `https://${TARGET_HOST}/`;
+    const PENDING_KEY = 'tc_pending_search';
+    const SETTINGS_KEY = 'tc_helper_settings';
+    const MAX_TITLE_LENGTH = 100;
+    const SCRIPT_VERSION = '1.8.0';
+    const DEFAULT_FADE_SECONDS = 10;
+    const ROUTE_PLAYER_ID = 'tc-authorized-route-player';
+
+    /*
+     * ==================== 自有/授权接口配置区 ====================
+     *
+     * 只填写你拥有使用权限并有正式文档的接口。
+     * urlTemplate 非空即自动启用，不需要再修改 enabled。
+     *
+     * 可用占位符：
+     *   {url}     当前视频平台的完整页面地址
+     *   {title}   识别到的片名
+     *   {episode} 识别到的集数/期数
+     *   {query}   界面中最终确认的搜索关键词
+     *
+     * 也兼容旧式“接口前缀”：地址不含占位符但以 =、?、& 或 / 结尾时，
+     * 脚本会自动在末尾拼接经过编码的当前视频页面 URL。
+     *
+     * 示例（仅演示格式，不是真实接口）：
+     * {
+     *     name: '我的授权接口',
+     *     urlTemplate: 'https://api.example.com/watch?source={url}'
+     * }
+     */
+    const AUTHORIZED_ROUTES = [
+        {
+            name: '授权线路 1',
+            urlTemplate: 'https://super.playr.top/?url='
+        },
+        {
+            name: '授权线路 2',
+            urlTemplate: 'https://json.fongmi.cc/web?url='
+        },
+        {
+            name: '授权线路 3',
+            urlTemplate: ''
+        }
+    ];
+    // ================== 自有/授权接口配置区结束 ==================
+
+    const PLAYER_TARGETS = [
+        {
+            host: /(^|\.)v\.qq\.com$/,
+            container: '#mod_player, #player-container, .container-player',
+            cleanup: '#mask_layer, .mod_vip_popup, .panel-tip-pay'
+        },
+        {
+            host: /(^|\.)iqiyi\.com$/,
+            container: '#areaLeftContainer, #outlayer, .iqp-player-videolayer',
+            cleanup: '#playerPopup, #vipCoversBox, .iqp-player-vipmask, .iqp-player-paymask, .iqp-player-loginmask'
+        },
+        {
+            host: /(^|\.)youku\.com$/,
+            container: '.player-container, #ykPlayer, #playerMouseWheel, .h5-detail-player',
+            cleanup: '#iframaWrapper, #video_side_cashier, .secondary-container.video_side_cashier_wrapper'
+        },
+        {
+            host: /(^|\.)mgtv\.com$/,
+            container: '#mgtv-player-wrap, .video-area',
+            cleanup: ''
+        },
+        {
+            host: /(^|\.)bilibili\.com$/,
+            container: '#player_module, #bilibiliPlayer, #bilibili-player, .player-wrapper, .player-container, .mplayer',
+            cleanup: ''
+        }
+    ];
+
+    const PLATFORM_RULES = [
+        {
+            host: /(^|\.)v\.qq\.com$/,
+            name: '腾讯视频',
+            titleSelectors: [
+                '[data-testid="video-title"]',
+                '.video_title_cn',
+                '.mod_intro .video_title',
+                '.player-title'
+            ],
+            episodeSelectors: [
+                '.playlist-item.current',
+                '.episode-item.current',
+                '[aria-current="true"]'
+            ]
+        },
+        {
+            host: /(^|\.)iqiyi\.com$/,
+            name: '爱奇艺',
+            titleSelectors: [
+                '[data-testid="play-title"]',
+                '.qy-player-title',
+                '.album-title',
+                '.play-title'
+            ],
+            episodeSelectors: [
+                '.qy-episode-num .selected',
+                '.episode-item.selected',
+                '[aria-current="true"]'
+            ]
+        },
+        {
+            host: /(^|\.)youku\.com$/,
+            name: '优酷',
+            titleSelectors: [
+                '.title-wrap .title',
+                '.video-title',
+                '.show-title',
+                '[data-spm="show-title"]'
+            ],
+            episodeSelectors: [
+                '.anthology-item.current',
+                '.episode-item.active',
+                '[aria-current="true"]'
+            ]
+        },
+        {
+            host: /(^|\.)mgtv\.com$/,
+            name: '芒果TV',
+            titleSelectors: [
+                '.video-title',
+                '.info-title',
+                '.detail-title',
+                'h1'
+            ],
+            episodeSelectors: [
+                '.episode-items .active',
+                '.episode-item.active',
+                '[aria-current="true"]'
+            ]
+        },
+        {
+            host: /(^|\.)bilibili\.com$/,
+            name: '哔哩哔哩',
+            titleSelectors: [
+                'h1.video-title',
+                '.media-title',
+                '.season-title',
+                'h1'
+            ],
+            episodeSelectors: [
+                '.ep-item.cursor',
+                '.video-episode-card__info-playing',
+                '.bpx-state-active',
+                '[aria-current="true"]'
+            ]
+        }
+    ];
+
+    GM_addStyle(`
+        #${APP_ID}, #${APP_ID} * { box-sizing: border-box; }
+        #${APP_ID} {
+            --tc-bg: rgba(24, 24, 54, .94);
+            --tc-panel: #181836;
+            --tc-text: #fffaf3;
+            --tc-muted: #c8c6df;
+            --tc-line: rgba(255, 255, 255, .18);
+            --tc-accent: #ff5fa2;
+            --tc-accent-2: #6c63ff;
+            --tc-sun: #ffd166;
+            --tc-mint: #5ee6b8;
+            position: fixed;
+            z-index: 2147483647;
+            inset: 0;
+            width: auto;
+            height: auto;
+            pointer-events: none;
+            color: var(--tc-text);
+            font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+                "Microsoft YaHei", sans-serif;
+        }
+        #${APP_ID} button, #${APP_ID} input, #${APP_ID} select { font: inherit; }
+        #${APP_ID} .tc-launcher {
+            position: absolute;
+            left: 12px;
+            top: calc(50vh - 24px);
+            width: 48px;
+            height: 48px;
+            padding: 0;
+            display: block;
+            border: 2px solid rgba(255,255,255,.72);
+            border-radius: 17px;
+            color: #fff;
+            background: linear-gradient(145deg, #ff71b5 0%, #8c6cff 52%, #4edfd0 100%);
+            box-shadow: 0 10px 28px rgba(86,67,196,.42), inset 0 1px 0 rgba(255,255,255,.42);
+            cursor: grab;
+            pointer-events: auto;
+            touch-action: none;
+            transition: opacity .35s ease, transform .2s ease, filter .2s ease;
+            overflow: hidden;
+        }
+        #${APP_ID} .tc-launcher:hover,
+        #${APP_ID}.tc-open .tc-launcher {
+            opacity: 1 !important;
+            transform: scale(1.07);
+            filter: saturate(1.12);
+        }
+        #${APP_ID} .tc-launcher.tc-dimmed { opacity: .34; }
+        #${APP_ID} .tc-launcher.tc-dragging {
+            cursor: grabbing;
+            opacity: .92;
+            transform: scale(1.09);
+            transition: none;
+        }
+        #${APP_ID} .tc-logo {
+            display: block;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        #${APP_ID} .tc-panel {
+            display: none;
+            position: absolute;
+            width: min(330px, calc(100vw - 16px));
+            overflow: hidden;
+            border: 1px solid var(--tc-line);
+            border-radius: 22px;
+            background:
+                radial-gradient(circle at 10% 0%, rgba(255,95,162,.18), transparent 34%),
+                radial-gradient(circle at 100% 16%, rgba(94,230,184,.15), transparent 30%),
+                var(--tc-bg);
+            box-shadow: 0 22px 55px rgba(7, 5, 32, .48), inset 0 1px 0 rgba(255,255,255,.08);
+            backdrop-filter: blur(20px) saturate(1.25);
+            pointer-events: auto;
+        }
+        #${APP_ID}.tc-open .tc-panel { display: block; }
+        #${APP_ID} .tc-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px 10px;
+            border-bottom: 1px solid var(--tc-line);
+            background: linear-gradient(100deg, rgba(255,95,162,.11), rgba(108,99,255,.1), rgba(94,230,184,.08));
+        }
+        #${APP_ID} .tc-brand { font-size: 16px; font-weight: 800; letter-spacing: .2px; }
+        #${APP_ID} .tc-version {
+            margin-left: 6px;
+            color: var(--tc-accent-2);
+            font-size: 10px;
+            font-weight: 650;
+        }
+        #${APP_ID} .tc-subtitle { color: var(--tc-muted); font-size: 12px; }
+        #${APP_ID} .tc-head-actions { display: flex; gap: 7px; }
+        #${APP_ID} .tc-close, #${APP_ID} .tc-gear, #${APP_ID} .tc-back-head {
+            width: 30px;
+            height: 30px;
+            border: 0;
+            border-radius: 9px;
+            color: var(--tc-muted);
+            background: rgba(148,163,184,.1);
+            cursor: pointer;
+        }
+        #${APP_ID} .tc-gear.tc-active {
+            color: #fff;
+            background: rgba(108,99,255,.66);
+        }
+        #${APP_ID} .tc-body { padding: 12px 14px 14px; }
+        #${APP_ID} [hidden] { display: none !important; }
+        #${APP_ID} .tc-label {
+            display: block;
+            margin: 0 0 6px;
+            color: var(--tc-muted);
+            font-size: 12px;
+        }
+        #${APP_ID} .tc-input {
+            width: 100%;
+            height: 38px;
+            padding: 0 12px;
+            border: 1px solid var(--tc-line);
+            border-radius: 11px;
+            outline: none;
+            color: var(--tc-text);
+            background: rgba(2, 6, 23, .48);
+        }
+        #${APP_ID} .tc-input:focus {
+            border-color: rgba(94,230,184,.8);
+            box-shadow: 0 0 0 3px rgba(94,230,184,.14);
+        }
+        #${APP_ID} .tc-search-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 64px 54px;
+            gap: 6px;
+        }
+        #${APP_ID} .tc-index-unit,
+        #${APP_ID} .tc-index-number {
+            width: 100%;
+            min-width: 0;
+            height: 38px;
+            padding: 0 6px;
+            border: 1px solid var(--tc-line);
+            border-radius: 11px;
+            outline: none;
+            color: var(--tc-text);
+            background: rgba(2,6,23,.48);
+            text-align: center;
+        }
+        #${APP_ID} .tc-index-number {
+            appearance: textfield;
+            padding-right: 20px;
+        }
+        #${APP_ID} .tc-index-number::-webkit-inner-spin-button,
+        #${APP_ID} .tc-index-number::-webkit-outer-spin-button {
+            margin: 0;
+            appearance: none;
+        }
+        #${APP_ID} .tc-number-wrap {
+            position: relative;
+            min-width: 0;
+        }
+        #${APP_ID} .tc-number-steps {
+            position: absolute;
+            top: 3px;
+            right: 3px;
+            bottom: 3px;
+            display: grid;
+            width: 17px;
+            gap: 2px;
+        }
+        #${APP_ID} .tc-step {
+            display: grid;
+            place-items: center;
+            min-width: 0;
+            min-height: 0;
+            padding: 0;
+            border: 0;
+            border-radius: 4px;
+            color: #cbd5e1;
+            background: rgba(148,163,184,.16);
+            cursor: pointer;
+            font-size: 10px;
+            line-height: 1;
+        }
+        #${APP_ID} .tc-row { display: flex; gap: 7px; margin-top: 9px; }
+        #${APP_ID} .tc-btn {
+            min-height: 36px;
+            flex: 1;
+            padding: 0 12px;
+            border: 1px solid var(--tc-line);
+            border-radius: 11px;
+            color: var(--tc-text);
+            background: rgba(148,163,184,.1);
+            cursor: pointer;
+        }
+        #${APP_ID} .tc-btn-primary {
+            border-color: transparent;
+            background: linear-gradient(110deg, var(--tc-accent), var(--tc-accent-2) 54%, #28bfc5);
+            box-shadow: 0 7px 18px rgba(108,99,255,.22);
+            font-weight: 700;
+        }
+        #${APP_ID} .tc-btn:disabled {
+            color: #64748b;
+            background: rgba(71,85,105,.08);
+            cursor: not-allowed;
+            opacity: .72;
+        }
+        #${APP_ID} .tc-route-label { margin-top: 14px; }
+        #${APP_ID} .tc-routes {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 7px;
+        }
+        #${APP_ID} .tc-routes .tc-btn {
+            min-width: 0;
+            padding: 0 6px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            font-size: 12px;
+        }
+        #${APP_ID} .tc-run { width: 100%; margin-top: 9px; }
+        #${APP_ID} .tc-settings-view { min-height: 210px; }
+        #${APP_ID} .tc-settings-title {
+            margin-bottom: 14px;
+            color: #e2e8f0;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        #${APP_ID} .tc-settings-body {
+            display: grid;
+            gap: 8px;
+        }
+        #${APP_ID} .tc-route-settings {
+            display: grid;
+            gap: 12px;
+            margin-top: 4px;
+            padding-top: 12px;
+            border-top: 1px solid var(--tc-line);
+        }
+        #${APP_ID} .tc-setting-label {
+            display: grid;
+            gap: 5px;
+            color: var(--tc-muted);
+            font-size: 11px;
+        }
+        #${APP_ID} .tc-setting-inline {
+            display: grid;
+            grid-template-columns: 1fr 84px;
+            align-items: center;
+            gap: 10px;
+        }
+        #${APP_ID} .tc-setting-check {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            color: var(--tc-muted);
+            font-size: 11px;
+        }
+        #${APP_ID} .tc-setting-check input {
+            width: 17px;
+            height: 17px;
+            accent-color: var(--tc-accent);
+        }
+        #${APP_ID} .tc-select {
+            width: 100%;
+            height: 36px;
+            padding: 0 8px;
+            border: 1px solid var(--tc-line);
+            border-radius: 9px;
+            outline: none;
+            color: var(--tc-text);
+            background: #111827;
+        }
+        #${APP_ID} .tc-meta {
+            margin-top: 10px;
+            color: var(--tc-muted);
+            font-size: 12px;
+        }
+        #${APP_ID} .tc-status {
+            display: none;
+            margin-top: 12px;
+            padding: 9px 11px;
+            border-radius: 10px;
+            color: #e7fff8;
+            background: linear-gradient(100deg, rgba(255,95,162,.14), rgba(94,230,184,.14));
+        }
+        #${APP_ID} .tc-status.tc-show { display: block; }
+        @media (max-width: 520px) {
+            #${APP_ID} .tc-launcher { width: 46px; height: 46px; border-radius: 16px; }
+        }
+    `);
+
+    function textOf(selector) {
+        const node = document.querySelector(selector);
+        return cleanText(node?.getAttribute('title') || node?.textContent || '');
+    }
+
+    function firstText(selectors) {
+        for (const selector of selectors || []) {
+            const text = textOf(selector);
+            if (text) return text;
+        }
+        return '';
+    }
+
+    function findVisibleTitleCandidate() {
+        const candidates = [...document.querySelectorAll(
+            'h1, h2, h3, h4, [data-title], [class*="title" i], [class*="name" i]'
+        )];
+        let best = {score: 0, text: ''};
+
+        candidates.forEach((node) => {
+            const text = cleanText(node.getAttribute('data-title') || node.textContent);
+            if (!text || text.length < 2 || text.length > 100 || node.offsetParent === null) return;
+            if (isGenericMediaTitle(text)) return;
+
+            const className = String(node.className || '');
+            const rect = node.getBoundingClientRect();
+            let score = 1;
+            if (/第\s*\d+\s*[集期话]/.test(text)) score += 40;
+            if (/player|play|video|album|detail|intro/i.test(className)) score += 20;
+            if (rect.top >= 0 && rect.top < 220) score += 12;
+            if (rect.left > window.innerWidth * 0.58 && rect.top >= 0 && rect.top < 360) score += 15;
+            if (text.length >= 2 && text.length <= 20) score += 8;
+            if (text.length >= 4 && text.length <= 60) score += 5;
+            if (score > best.score) best = {score, text};
+        });
+
+        return best.text;
+    }
+
+    function cleanText(value) {
+        return String(value || '')
+            .replace(/\s+/g, ' ')
+            .replace(/^\s+|\s+$/g, '')
+            .slice(0, MAX_TITLE_LENGTH);
+    }
+
+    function isGenericMediaTitle(value) {
+        const text = cleanText(value);
+        if (!text) return true;
+        return /^(?:腾讯视频|爱奇艺|优酷|芒果TV|哔哩哔哩|bilibili|首页|电视剧|电影|综艺|动漫|视频|讨论|选集|播放列表|相关推荐|周边视频)$/i.test(text)
+            || /^(?:正片\s*)?(?:第\s*)?\d{1,4}\s*[集期话](?:上|中|下|完结|纯享版|加更版)?(?:\s|$|[：:—-])/i.test(text)
+            || /^(?:爱奇艺|腾讯视频)\s*[-—_：:]?\s*(?:在线视频网站|海量正版|热门视频).*$/i.test(text)
+            || /^(?:爱奇艺|腾讯视频).*(?:海量正版|高清在线观看).*$/i.test(text);
+    }
+
+    function readNestedValue(root, path) {
+        return path.split('.').reduce((value, key) => value?.[key], root);
+    }
+
+    function findStructuredString(root, preferredKeys) {
+        if (!root || typeof root !== 'object') return '';
+        const queue = [{value: root, depth: 0}];
+        const visited = new WeakSet();
+        let checked = 0;
+
+        while (queue.length && checked < 12000) {
+            const {value, depth} = queue.shift();
+            if (!value || typeof value !== 'object' || visited.has(value)) continue;
+            visited.add(value);
+            checked += 1;
+
+            for (const key of preferredKeys) {
+                const candidate = value[key];
+                if (
+                    typeof candidate === 'string'
+                    && candidate.length >= 2
+                    && candidate.length <= 100
+                    && !isGenericMediaTitle(candidate)
+                ) {
+                    return cleanText(candidate);
+                }
+            }
+            if (depth >= 8) continue;
+
+            Object.entries(value).forEach(([key, child]) => {
+                if (/recommend|related|suggest|rank|hot/i.test(key)) return;
+                if (child && typeof child === 'object') {
+                    queue.push({value: child, depth: depth + 1});
+                }
+            });
+        }
+        return '';
+    }
+
+    function findStructuredStringInScripts(preferredKeys) {
+        const keyPattern = preferredKeys
+            .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+            .join('|');
+        if (!keyPattern) return '';
+        const pattern = new RegExp(`"(?:${keyPattern})"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
+
+        for (const script of document.scripts) {
+            const source = script.textContent || '';
+            if (!source || source.length > 6_000_000) continue;
+            const match = source.match(pattern);
+            if (!match) continue;
+            try {
+                const candidate = JSON.parse(`"${match[1]}"`);
+                if (!isGenericMediaTitle(candidate)) return cleanText(candidate);
+            } catch (error) {
+                // 忽略无法解码的内嵌数据，继续检查其他脚本。
+            }
+        }
+        return '';
+    }
+
+    function extractStructuredPlatformTitle(platform) {
+        const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+        if (platform?.name === '哔哩哔哩') {
+            const directPaths = [
+                '__INITIAL_STATE__.mediaInfo.title',
+                '__INITIAL_STATE__.mediaInfo.season_title',
+                '__INITIAL_STATE__.epInfo.season_title',
+                '__INITIAL_STATE__.seasonInfo.title'
+            ];
+            for (const path of directPaths) {
+                const candidate = readNestedValue(page, path);
+                if (typeof candidate === 'string' && !isGenericMediaTitle(candidate)) {
+                    return cleanText(candidate);
+                }
+            }
+            const keys = ['season_title', 'seasonTitle', 'media_title', 'mediaTitle'];
+            return findStructuredString(page.__INITIAL_STATE__, keys)
+                || findStructuredStringInScripts(keys);
+        }
+
+        if (platform?.name === '优酷') {
+            const roots = [
+                page.__INITIAL_DATA__,
+                page.__INITIAL_STATE__,
+                page.__NEXT_DATA__,
+                page.__NUXT__
+            ];
+            const keys = [
+                'showName',
+                'show_name',
+                'seriesName',
+                'series_name',
+                'albumName',
+                'album_name',
+                'programName',
+                'showTitle'
+            ];
+            for (const root of roots) {
+                const candidate = findStructuredString(root, keys);
+                if (candidate) return candidate;
+            }
+            return findStructuredStringInScripts(keys);
+        }
+
+        if (platform?.name === '腾讯视频') {
+            const roots = [
+                page.__INITIAL_DATA__,
+                page.__INITIAL_STATE__,
+                page.__NEXT_DATA__,
+                page.__PINIA__,
+                page.__NUXT__,
+                page.__PLAYER_CONFIG__
+            ];
+            const keys = [
+                'coverTitle',
+                'cover_title',
+                'albumName',
+                'album_name',
+                'showName',
+                'show_name',
+                'seriesName',
+                'series_name',
+                'programName',
+                'columnName'
+            ];
+            for (const root of roots) {
+                const candidate = findStructuredString(root, keys);
+                if (candidate) return candidate;
+            }
+            return findStructuredStringInScripts(keys);
+        }
+        return '';
+    }
+
+    let structuredTitleCache = {url: '', title: '', checkedAt: 0};
+
+    function getStructuredPlatformTitle(platform) {
+        if (
+            structuredTitleCache.url === location.href
+            && (structuredTitleCache.title || Date.now() - structuredTitleCache.checkedAt < 3000)
+        ) {
+            return structuredTitleCache.title;
+        }
+        structuredTitleCache = {
+            url: location.href,
+            title: extractStructuredPlatformTitle(platform),
+            checkedAt: Date.now()
+        };
+        return structuredTitleCache.title;
+    }
+
+    function metaContent(...selectors) {
+        for (const selector of selectors) {
+            const value = document.querySelector(selector)?.content;
+            if (value) return cleanText(value);
+        }
+        return '';
+    }
+
+    function stripTitleDecorations(value) {
+        return cleanText(value)
+            .replace(/^[《〈「『【〔“"'‘]+\s*/, '')
+            .replace(/\s*[》〉」』】〕”"'’]+$/, '');
+    }
+
+    function normalizeDocumentTitle(value) {
+        return stripTitleDecorations(
+            cleanText(value)
+            .replace(/^(.+?)_0*\d{1,4}_(?:电视剧|电影|综艺|动漫).*$/i, '$1')
+            .replace(/\s*[-_|—]\s*(腾讯视频|爱奇艺|优酷|芒果TV|哔哩哔哩|bilibili).*$/i, '')
+            .replace(/\s*在线观看.*$/i, '')
+            .replace(/\s*高清视频.*$/i, '')
+            .replace(/(?:简介|详情)$/, '')
+        );
+    }
+
+    function chooseBestMediaTitle(candidates) {
+        const normalized = candidates
+            .map((value) => normalizeDocumentTitle(value))
+            .filter((title) => title && !isGenericMediaTitle(title));
+        const reliable = normalized.find((title) => (
+            !/^第\s*\d{1,2}\s*季$/.test(title)
+            && !/^(?:正片\s*)?第\s*\d{1,4}\s*[集期话]/.test(title)
+            && !/^(?:特别加更|加更|纯享|先导|预告|花絮|彩蛋)(?:\s|[：:]|$)/.test(title)
+        ));
+        return reliable || normalized[0] || '';
+    }
+
+    function extractPlatformDocumentTitle(platform) {
+        const tabTitle = cleanText(document.title);
+        if (!tabTitle || isGenericMediaTitle(tabTitle)) return '';
+
+        const numberedTitle = tabTitle.match(
+            /^(.+?)(?:[_\s-]+)(?:第)?0*(\d{1,4})(?:\s*[集期话])?(?:[_\s-]+)(?:电视剧|电影|综艺|动漫|国创|番剧)/
+        );
+        if (numberedTitle) return cleanText(numberedTitle[1]);
+
+        const intent = parseSearchIntent(tabTitle);
+        if (intent.episodeNumber && intent.title && !isGenericMediaTitle(intent.title)) {
+            return intent.title;
+        }
+
+        if (['哔哩哔哩', '优酷', '腾讯视频'].includes(platform?.name)) {
+            const baseTitle = cleanText(
+                tabTitle.split(/\s*[-_|—]\s*(?:电视剧|电影|综艺|动漫|国创|番剧|高清|优酷|腾讯视频|bilibili|哔哩哔哩)/i)[0]
+            );
+            return isGenericMediaTitle(baseTitle) ? '' : baseTitle;
+        }
+        return '';
+    }
+
+    function parseSearchIntent(value) {
+        const query = cleanText(value);
+        const episodeMatch = query.match(
+            /第\s*(\d{1,4})\s*([集期话部])|(?:^|\s)EP?\s*0*(\d{1,4})(?:\s|$)/i
+        );
+        const episodeNumber = episodeMatch
+            ? Number(episodeMatch[1] || episodeMatch[3])
+            : null;
+        const indexUnit = episodeMatch
+            ? (episodeMatch[2] || '集')
+            : '';
+        const title = cleanText(
+            episodeMatch
+                ? query.slice(0, episodeMatch.index)
+                : query
+        ).replace(/[：:：\-—]+$/, '');
+
+        return {
+            title: title || query,
+            episodeNumber: Number.isFinite(episodeNumber) ? episodeNumber : null,
+            indexUnit
+        };
+    }
+
+    function extractEpisode(...values) {
+        const text = values.filter(Boolean).join(' ');
+        const patterns = [
+            {pattern: /第\s*(\d{1,4})\s*([集期话部])/i, unitIndex: 2},
+            {pattern: /(?:更新至|全)\s*(\d{1,4})\s*集/i, unit: '集'},
+            {pattern: /\bEP?\s*0*(\d{1,4})\b/i, unit: '集'},
+            {pattern: /(?:第)?\s*(\d{1,4})\s*期/i, unit: '期'},
+            {pattern: /(?:^|_)0*(\d{1,4})(?:_|$)/, unit: '集'}
+        ];
+        for (const item of patterns) {
+            const match = text.match(item.pattern);
+            if (match) {
+                const unit = item.unit || match[item.unitIndex] || '集';
+                return `第${Number(match[1])}${unit}`;
+            }
+        }
+        return '';
+    }
+
+    function findSelectedEpisodeText() {
+        const nodes = document.querySelectorAll(
+            '[aria-current="true"], [class*="active" i], [class*="current" i], [class*="selected" i]'
+        );
+        let best = '';
+        let bestScore = 0;
+        for (const node of nodes) {
+            if (node.closest?.(`#${APP_ID}`)) continue;
+            const text = cleanText(node.getAttribute?.('title') || node.textContent);
+            if (!text || text.length > 180 || !/第\s*\d{1,4}\s*[集期话]/.test(text)) continue;
+            let score = 10;
+            if (/20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}/.test(text)) score += 30;
+            if (/特别加更|加更|纯享|先导|预告|花絮|彩蛋/.test(text)) score += 20;
+            if (text.length >= 8 && text.length <= 100) score += 8;
+            if (score > bestScore) {
+                best = text;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    function extractAirDate(...values) {
+        const text = values.filter(Boolean).join(' ');
+        const separated = text.match(
+            /(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日)?/
+        );
+        if (separated) {
+            return [
+                separated[1],
+                separated[2].padStart(2, '0'),
+                separated[3].padStart(2, '0')
+            ].join('');
+        }
+        return text.match(/\b(20\d{6})\b/)?.[1] || '';
+    }
+
+    function extractEpisodeVariant(...values) {
+        const text = values.filter(Boolean).join(' ');
+        const variants = [
+            '特别加更',
+            '加更',
+            '纯享版',
+            '纯享',
+            '先导片',
+            '先导',
+            '预告',
+            '花絮',
+            '彩蛋'
+        ];
+        return variants.find((variant) => text.includes(variant)) || '正片';
+    }
+
+    function detectMediaType(...values) {
+        const text = values.filter(Boolean).join(' ');
+        const url = location.href;
+        if (/[?&]theme=movie(?:&|$)/i.test(url) || /电影|movie/i.test(text)) {
+            return 'movie';
+        }
+        if (/综艺|真人秀|variety/i.test(text)) return 'variety';
+        if (/动漫|动画|国创|anime/i.test(text)) return 'anime';
+        if (/电视剧|短剧|连续剧|tv series/i.test(text)) return 'tv';
+        return '';
+    }
+
+    function extractReleaseYear(...values) {
+        const text = values.filter(Boolean).join(' ');
+        const year = text.match(/\b((?:19|20)\d{2})\b/)?.[1];
+        return year || '';
+    }
+
+    function getPlatformInfo() {
+        return PLATFORM_RULES.find((item) => item.host.test(location.hostname)) || null;
+    }
+
+    function extractMediaInfo() {
+        const platform = getPlatformInfo();
+        const structuredTitle = getStructuredPlatformTitle(platform);
+        const domTitle = firstText(platform?.titleSelectors);
+        const platformDocumentTitle = extractPlatformDocumentTitle(platform);
+        const visibleTitle = findVisibleTitleCandidate();
+        const ogTitle = metaContent(
+            'meta[property="og:title"]',
+            'meta[name="title"]',
+            'meta[itemprop="name"]'
+        );
+        const episodeText = firstText(platform?.episodeSelectors) || findSelectedEpisodeText();
+        const rawTitle = chooseBestMediaTitle([
+            structuredTitle,
+            platformDocumentTitle,
+            domTitle,
+            ogTitle,
+            visibleTitle,
+            document.title
+        ]);
+        const normalizedTitle = normalizeDocumentTitle(rawTitle);
+        const episode = extractEpisode(episodeText, rawTitle, document.title);
+        const title = stripTitleDecorations(parseSearchIntent(normalizedTitle).title);
+        const episodeIntent = parseSearchIntent(episode);
+        const episodeContext = [episodeText, rawTitle, document.title].filter(Boolean).join(' ');
+        const pageMeta = [
+            metaContent(
+                'meta[property="og:type"]',
+                'meta[itemprop="genre"]',
+                'meta[name="genre"]'
+            )
+        ].filter(Boolean).join(' ');
+        const releaseMeta = metaContent(
+            'meta[property="video:release_date"]',
+            'meta[itemprop="copyrightYear"]'
+        );
+        const episodeVariant = episode ? extractEpisodeVariant(episodeContext) : '';
+        const query = cleanText([
+            title,
+            episode,
+            episodeVariant && episodeVariant !== '正片' ? episodeVariant : ''
+        ].filter(Boolean).join(' '));
+
+        return {
+            platform: platform?.name || location.hostname,
+            title,
+            episode,
+            episodeNumber: episodeIntent.episodeNumber,
+            indexUnit: episodeIntent.indexUnit,
+            airDate: extractAirDate(episodeContext),
+            episodeVariant,
+            mediaType: detectMediaType(rawTitle, document.title, pageMeta),
+            releaseYear: extractReleaseYear(rawTitle, document.title, releaseMeta),
+            query,
+            sourceUrl: location.href,
+            createdAt: Date.now()
+        };
+    }
+
+    function isRouteConfigured(route) {
+        return Boolean(cleanText(route?.urlTemplate));
+    }
+
+    function getSettings() {
+        const stored = GM_getValue(SETTINGS_KEY, {});
+        const firstEnabledIndex = AUTHORIZED_ROUTES.findIndex(
+            (route) => isRouteConfigured(route)
+        );
+        const storedIndex = Number(stored?.defaultRouteIndex);
+        const validStoredRoute = isRouteConfigured(AUTHORIZED_ROUTES[storedIndex]);
+
+        return {
+            defaultAction: stored?.defaultAction === 'route' ? 'route' : 'target',
+            defaultRouteIndex: validStoredRoute ? storedIndex : firstEnabledIndex,
+            fadeSeconds: Number.isFinite(Number(stored?.fadeSeconds))
+                ? Math.min(300, Math.max(0, Number(stored.fadeSeconds)))
+                : DEFAULT_FADE_SECONDS,
+            edgeSnap: stored?.edgeSnap !== false,
+            launcherPosition: stored?.launcherPosition
+                && Number.isFinite(Number(stored.launcherPosition.x))
+                && Number.isFinite(Number(stored.launcherPosition.y))
+                ? {
+                    x: Math.min(1, Math.max(0, Number(stored.launcherPosition.x))),
+                    y: Math.min(1, Math.max(0, Number(stored.launcherPosition.y)))
+                }
+                : null
+        };
+    }
+
+    function saveSettings(settings) {
+        GM_setValue(SETTINGS_KEY, settings);
+    }
+
+    function createShell({
+        title,
+        subtitle,
+        value,
+        targetMode = false,
+        routes = [],
+        settings = getSettings()
+    }) {
+        const routeButtons = routes.map((route, index) => `
+            <button
+                class="tc-btn"
+                type="button"
+                data-route-index="${index}"
+                ${isRouteConfigured(route) ? '' : 'disabled'}
+                title="${isRouteConfigured(route) ? '使用已配置的授权线路' : '请在脚本顶部的授权接口配置区填写'}"
+            >${escapeHtml(route.name)}</button>
+        `).join('');
+        const hasAvailableRoutes = routes.some((route) => isRouteConfigured(route));
+        const routeOptions = `${hasAvailableRoutes ? '' : '<option value="-1" selected>暂无可用线路</option>'}${routes.map((route, index) => {
+            const available = isRouteConfigured(route);
+            return `
+                <option
+                    value="${index}"
+                    ${index === settings.defaultRouteIndex ? 'selected' : ''}
+                    ${available ? '' : 'disabled'}
+                >${escapeHtml(route.name)}${available ? '' : '（未配置）'}</option>
+            `;
+        }).join('')}`;
+        const placeholderIntent = parseSearchIntent(value);
+        const root = document.createElement('section');
+        root.id = APP_ID;
+        root.innerHTML = `
+            <div class="tc-panel" role="dialog" aria-label="天虫追剧助手">
+                <header class="tc-head">
+                    <div>
+                        <div class="tc-brand">${escapeHtml(title)}<span class="tc-version">v${SCRIPT_VERSION}</span></div>
+                        <div class="tc-subtitle">${escapeHtml(subtitle)}</div>
+                    </div>
+                    <div class="tc-head-actions">
+                        ${targetMode ? '' : '<button class="tc-back-head" type="button" aria-label="返回主界面" title="返回主界面" hidden>←</button><button class="tc-gear" type="button" aria-label="设置" title="设置">⚙</button>'}
+                        <button class="tc-close" type="button" aria-label="关闭">×</button>
+                    </div>
+                </header>
+                <div class="tc-body tc-main-view">
+                    <label class="tc-label" for="tc-query">片名 / 节目名</label>
+                    <div class="tc-search-grid">
+                        <input
+                            class="tc-input"
+                            id="tc-query"
+                            maxlength="100"
+                            value=""
+                            title="${escapeHtml(placeholderIntent.title)}"
+                            placeholder="${escapeHtml(placeholderIntent.title || '输入片名或节目名')}"
+                        >
+                        <div class="tc-number-wrap">
+                            <input
+                                class="tc-index-number"
+                                id="tc-index-number"
+                                type="number"
+                                min="1"
+                                max="9999"
+                                inputmode="numeric"
+                                value=""
+                                placeholder="${placeholderIntent.episodeNumber || '序号'}"
+                                aria-label="集期部序号"
+                            >
+                            <div class="tc-number-steps">
+                                <button class="tc-step" type="button" data-index-step="1" aria-label="序号加一">+</button>
+                                <button class="tc-step" type="button" data-index-step="-1" aria-label="序号减一">−</button>
+                            </div>
+                        </div>
+                        <select class="tc-index-unit" id="tc-index-unit" aria-label="类型" title="选择集、期、部或话">
+                            <option value="">无</option>
+                            <option value="集">集</option>
+                            <option value="期">期</option>
+                            <option value="部">部</option>
+                            <option value="话">话</option>
+                        </select>
+                    </div>
+                    ${targetMode
+                        ? '<div class="tc-row"><button class="tc-btn tc-btn-primary" data-action="fill">定位并播放</button></div>'
+                        : `
+                            <button class="tc-btn tc-btn-primary tc-run" data-action="run-default"></button>
+                            <div class="tc-row">
+                                <button class="tc-btn" data-action="refresh">重新识别</button>
+                                <button class="tc-btn" data-action="manual">手动搜索</button>
+                                <button class="tc-btn" data-action="open">直达资源</button>
+                            </div>
+                        `}
+                    <div class="tc-status" role="status"></div>
+                    <div class="tc-meta"></div>
+                </div>
+                ${targetMode ? '' : `
+                    <div class="tc-body tc-settings-view" hidden>
+                        <div class="tc-settings-title">助手设置</div>
+                        <div class="tc-settings-body">
+                            <label class="tc-setting-label">
+                                默认操作
+                                <select class="tc-select" data-setting="action">
+                                    <option value="target" ${settings.defaultAction === 'target' ? 'selected' : ''}>跳转目标站</option>
+                                    <option value="route" ${settings.defaultAction === 'route' ? 'selected' : ''}>授权接口</option>
+                                </select>
+                            </label>
+                            <label class="tc-setting-label tc-setting-inline">
+                                <span>闲置后淡化（秒，0 为关闭）</span>
+                                <input class="tc-select" data-setting="fade-seconds" type="number" min="0" max="300" step="1" value="${settings.fadeSeconds}">
+                            </label>
+                            <label class="tc-setting-check">
+                                <span>松手后自动吸附屏幕边缘</span>
+                                <input data-setting="edge-snap" type="checkbox" ${settings.edgeSnap ? 'checked' : ''}>
+                            </label>
+                            <div class="tc-route-settings" ${settings.defaultAction === 'route' ? '' : 'hidden'}>
+                                <label class="tc-setting-label">
+                                    默认线路
+                                    <select class="tc-select" data-setting="route">${routeOptions}</select>
+                                </label>
+                                <div>
+                                    <label class="tc-label">自有/授权线路</label>
+                                    <div class="tc-routes">${routeButtons}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `}
+            </div>
+            <button class="tc-launcher" type="button" aria-label="打开天虫追剧助手" title="拖动毛毛虫可调整位置">
+                <svg class="tc-logo" viewBox="0 0 64 64" aria-hidden="true">
+                    <defs>
+                        <linearGradient id="tc-caterpillar-body" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0" stop-color="#fff36b"/>
+                            <stop offset=".5" stop-color="#65efaa"/>
+                            <stop offset="1" stop-color="#2fcbd2"/>
+                        </linearGradient>
+                    </defs>
+                    <path d="M42 17c2-6 6-8 9-9M43 17c6-3 10-2 13 0" fill="none" stroke="#fff8d8" stroke-width="2.6" stroke-linecap="round"/>
+                    <circle cx="51" cy="8" r="2.4" fill="#ffd166"/><circle cx="56" cy="17" r="2.4" fill="#ff8fc7"/>
+                    <circle cx="22" cy="40" r="11" fill="#ffd166"/><circle cx="33" cy="36" r="12" fill="#ff8fc7"/>
+                    <circle cx="45" cy="30" r="13" fill="url(#tc-caterpillar-body)"/>
+                    <circle cx="41" cy="27" r="2.1" fill="#28304d"/><circle cx="50" cy="25" r="2.1" fill="#28304d"/>
+                    <path d="M42 33c3 3 7 3 10-1" fill="none" stroke="#28304d" stroke-width="2.2" stroke-linecap="round"/>
+                    <circle cx="17" cy="36" r="3" fill="#8c6cff"/><circle cx="27" cy="30" r="3" fill="#ff6c9f"/>
+                    <path d="M17 49l-3 5M29 47l-1 6M40 42l2 5" stroke="#fff8d8" stroke-width="2.6" stroke-linecap="round"/>
+                </svg>
+            </button>
+        `;
+        document.body.appendChild(root);
+
+        const launcher = root.querySelector('.tc-launcher');
+        const panel = root.querySelector('.tc-panel');
+        let runtimeSettings = settings;
+        let launcherPoint = {x: 12, y: Math.max(8, (window.innerHeight - launcher.offsetHeight) / 2)};
+        let dimTimer = 0;
+        let suppressNextClick = false;
+
+        const saveSettingPatch = (patch) => {
+            runtimeSettings = {...getSettings(), ...patch};
+            saveSettings(runtimeSettings);
+        };
+        const positionPanel = () => {
+            if (!root.classList.contains('tc-open')) return;
+            const panelWidth = panel.offsetWidth || Math.min(330, window.innerWidth - 16);
+            const panelHeight = panel.offsetHeight || 360;
+            const launcherSize = launcher.offsetWidth || 48;
+            const gap = 10;
+            const left = Math.min(
+                window.innerWidth - panelWidth - 8,
+                Math.max(8, launcherPoint.x + launcherSize / 2 - panelWidth / 2)
+            );
+            const above = launcherPoint.y - panelHeight - gap;
+            const top = above >= 8
+                ? above
+                : Math.min(window.innerHeight - panelHeight - 8, launcherPoint.y + launcherSize + gap);
+            panel.style.left = `${Math.max(8, left)}px`;
+            panel.style.top = `${Math.max(8, top)}px`;
+        };
+        const applyLauncherPosition = (position = runtimeSettings.launcherPosition) => {
+            const maxX = Math.max(0, window.innerWidth - launcher.offsetWidth);
+            const maxY = Math.max(0, window.innerHeight - launcher.offsetHeight);
+            launcherPoint = position
+                ? {x: position.x * maxX, y: position.y * maxY}
+                : {x: Math.min(12, maxX), y: maxY / 2};
+            launcher.style.left = `${Math.round(launcherPoint.x)}px`;
+            launcher.style.top = `${Math.round(launcherPoint.y)}px`;
+            positionPanel();
+        };
+        const saveLauncherPosition = () => {
+            const maxX = Math.max(1, window.innerWidth - launcher.offsetWidth);
+            const maxY = Math.max(1, window.innerHeight - launcher.offsetHeight);
+            saveSettingPatch({
+                launcherPosition: {
+                    x: launcherPoint.x / maxX,
+                    y: launcherPoint.y / maxY
+                }
+            });
+        };
+        const snapLauncherToEdge = () => {
+            if (!runtimeSettings.edgeSnap) return;
+            launcherPoint.x = launcherPoint.x + launcher.offsetWidth / 2 < window.innerWidth / 2
+                ? 8
+                : window.innerWidth - launcher.offsetWidth - 8;
+            launcher.style.left = `${Math.round(launcherPoint.x)}px`;
+            saveLauncherPosition();
+            positionPanel();
+        };
+        const scheduleDim = () => {
+            clearTimeout(dimTimer);
+            launcher.classList.remove('tc-dimmed');
+            const seconds = Number(runtimeSettings.fadeSeconds);
+            if (seconds <= 0) return;
+            dimTimer = window.setTimeout(() => {
+                if (root.classList.contains('tc-open')) {
+                    root.classList.remove('tc-open');
+                }
+                snapLauncherToEdge();
+                requestAnimationFrame(() => {
+                    clearTimeout(dimTimer);
+                    launcher.classList.add('tc-dimmed');
+                });
+            }, seconds * 1000);
+        };
+        const setOpen = (open) => {
+            root.classList.toggle('tc-open', open);
+            if (open) {
+                launcher.classList.remove('tc-dimmed');
+                requestAnimationFrame(positionPanel);
+            }
+            scheduleDim();
+        };
+        applyLauncherPosition();
+        scheduleDim();
+
+        launcher.addEventListener('click', () => {
+            if (suppressNextClick) {
+                suppressNextClick = false;
+                return;
+            }
+            setOpen(!root.classList.contains('tc-open'));
+        });
+        launcher.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) return;
+            const start = {x: event.clientX, y: event.clientY, left: launcherPoint.x, top: launcherPoint.y};
+            let moved = false;
+            launcher.setPointerCapture(event.pointerId);
+            launcher.classList.add('tc-dragging');
+            launcher.classList.remove('tc-dimmed');
+            clearTimeout(dimTimer);
+
+            const move = (moveEvent) => {
+                const dx = moveEvent.clientX - start.x;
+                const dy = moveEvent.clientY - start.y;
+                if (Math.hypot(dx, dy) > 4) moved = true;
+                if (!moved) return;
+                launcherPoint.x = Math.min(window.innerWidth - launcher.offsetWidth, Math.max(0, start.left + dx));
+                launcherPoint.y = Math.min(window.innerHeight - launcher.offsetHeight, Math.max(0, start.top + dy));
+                launcher.style.left = `${Math.round(launcherPoint.x)}px`;
+                launcher.style.top = `${Math.round(launcherPoint.y)}px`;
+                positionPanel();
+            };
+            const end = () => {
+                launcher.removeEventListener('pointermove', move);
+                launcher.removeEventListener('pointerup', end);
+                launcher.removeEventListener('pointercancel', end);
+                launcher.classList.remove('tc-dragging');
+                if (moved) {
+                    if (runtimeSettings.edgeSnap) snapLauncherToEdge();
+                    else saveLauncherPosition();
+                    suppressNextClick = true;
+                    positionPanel();
+                }
+                scheduleDim();
+            };
+            launcher.addEventListener('pointermove', move);
+            launcher.addEventListener('pointerup', end);
+            launcher.addEventListener('pointercancel', end);
+        });
+        launcher.addEventListener('pointerenter', scheduleDim);
+        launcher.addEventListener('pointerleave', scheduleDim);
+        ['pointerdown', 'input', 'change', 'keydown', 'wheel'].forEach((eventName) => {
+            panel.addEventListener(eventName, scheduleDim, eventName === 'wheel' ? {passive: true} : false);
+        });
+        window.addEventListener('resize', () => applyLauncherPosition(runtimeSettings.launcherPosition));
+        root.querySelector('.tc-close').addEventListener('click', () => setOpen(false));
+        new MutationObserver(() => {
+            if (root.classList.contains('tc-open')) requestAnimationFrame(positionPanel);
+            scheduleDim();
+        }).observe(root, {attributes: true, attributeFilter: ['class']});
+        const gearButton = root.querySelector('.tc-gear');
+        const backButton = root.querySelector('.tc-back-head');
+        const mainView = root.querySelector('.tc-main-view');
+        const settingsView = root.querySelector('.tc-settings-view');
+        gearButton?.addEventListener('click', () => {
+            const openingSettings = settingsView.hidden;
+            settingsView.hidden = !openingSettings;
+            mainView.hidden = openingSettings;
+            gearButton.classList.toggle('tc-active', openingSettings);
+            backButton.hidden = !openingSettings;
+        });
+        backButton?.addEventListener('click', () => {
+            if (!settingsView.hidden) gearButton?.click();
+        });
+        const fadeSecondsInput = root.querySelector('[data-setting="fade-seconds"]');
+        const edgeSnapInput = root.querySelector('[data-setting="edge-snap"]');
+        fadeSecondsInput?.addEventListener('change', () => {
+            const seconds = Math.min(300, Math.max(0, Number(fadeSecondsInput.value) || 0));
+            fadeSecondsInput.value = String(seconds);
+            saveSettingPatch({fadeSeconds: seconds});
+            scheduleDim();
+        });
+        edgeSnapInput?.addEventListener('change', () => {
+            saveSettingPatch({edgeSnap: edgeSnapInput.checked});
+        });
+        const numberInput = root.querySelector('#tc-index-number');
+        root.querySelectorAll('[data-index-step]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const delta = Number(button.dataset.indexStep);
+                const current = Number.parseInt(numberInput.value, 10);
+                const base = Number.isFinite(current) ? current : (delta > 0 ? 0 : 2);
+                numberInput.value = String(Math.min(9999, Math.max(1, base + delta)));
+                numberInput.dispatchEvent(new Event('input', {bubbles: true}));
+                numberInput.dispatchEvent(new Event('change', {bubbles: true}));
+            });
+        });
+        const openAndFocusSearch = () => {
+            setOpen(true);
+            if (settingsView) settingsView.hidden = true;
+            mainView.hidden = false;
+            gearButton?.classList.remove('tc-active');
+            if (backButton) backButton.hidden = true;
+            const searchInput = root.querySelector('#tc-query');
+            searchInput?.focus();
+            searchInput?.select();
+        };
+        GM_registerMenuCommand('打开天虫追剧助手', openAndFocusSearch);
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && root.classList.contains('tc-open')) {
+                if (settingsView && !settingsView.hidden) gearButton?.click();
+                else setOpen(false);
+                return;
+            }
+            if (event.altKey && event.key.toLowerCase() === 's') {
+                event.preventDefault();
+                openAndFocusSearch();
+            }
+        });
+        return root;
+    }
+
+    function escapeHtml(value) {
+        return String(value || '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        })[char]);
+    }
+
+    function setStatus(root, message) {
+        const status = root.querySelector('.tc-status');
+        status.textContent = message;
+        status.classList.toggle('tc-show', Boolean(message));
+    }
+
+    function buildAuthorizedRouteUrl(route, mediaInfo, query) {
+        if (!isRouteConfigured(route)) return '';
+
+        const values = {
+            url: mediaInfo.sourceUrl,
+            title: mediaInfo.title || query,
+            episode: mediaInfo.episode,
+            query
+        };
+        const hasPlaceholder = /\{(?:url|title|episode|query)\}/.test(route.urlTemplate);
+        let rendered;
+        if (hasPlaceholder) {
+            rendered = route.urlTemplate.replace(
+                /\{(url|title|episode|query)\}/g,
+                (_, key) => encodeURIComponent(values[key] || '')
+            );
+        } else if (/[=?&/]$/.test(route.urlTemplate.trim())) {
+            rendered = `${route.urlTemplate.trim()}${encodeURIComponent(values.url || '')}`;
+        } else {
+            throw new Error('线路地址需包含占位符，或以 =、?、&、/ 结尾作为接口前缀');
+        }
+        const parsed = new URL(rendered);
+        if (parsed.protocol !== 'https:') {
+            throw new Error('授权接口必须使用 HTTPS');
+        }
+        return parsed.href;
+    }
+
+    function waitForPlayerContainer(selector, timeoutMs = 12000) {
+        const existing = document.querySelector(selector);
+        if (existing) return Promise.resolve(existing);
+
+        return new Promise((resolve, reject) => {
+            const observer = new MutationObserver(() => {
+                const container = document.querySelector(selector);
+                if (!container) return;
+                clearTimeout(timeout);
+                observer.disconnect();
+                resolve(container);
+            });
+            const timeout = window.setTimeout(() => {
+                observer.disconnect();
+                reject(new Error('未找到当前网站的原播放窗口'));
+            }, timeoutMs);
+            observer.observe(document.documentElement, {childList: true, subtree: true});
+        });
+    }
+
+    function hidePlayerOverlays(selector) {
+        if (!selector) return;
+        document.querySelectorAll(selector).forEach((node) => {
+            node.style.setProperty('display', 'none', 'important');
+            node.style.setProperty('opacity', '0', 'important');
+            node.style.setProperty('pointer-events', 'none', 'important');
+        });
+    }
+
+    async function showAuthorizedRouteInPlayer(routeUrl) {
+        const target = PLAYER_TARGETS.find((item) => item.host.test(location.hostname));
+        if (!target) throw new Error('当前网站尚未配置原窗口播放位置');
+
+        const container = await waitForPlayerContainer(target.container);
+        const rect = container.getBoundingClientRect();
+        const computed = getComputedStyle(container);
+        const fallbackHeight = Math.max(
+            180,
+            Math.min(
+                Math.round((rect.width || window.innerWidth) * 9 / 16),
+                Math.round(window.innerHeight * .72)
+            )
+        );
+        const playerHeight = rect.height >= 120 ? rect.height : fallbackHeight;
+
+        hidePlayerOverlays(target.cleanup);
+        container.querySelectorAll('video, audio').forEach((media) => {
+            try {
+                media.pause();
+                media.removeAttribute('autoplay');
+            } catch (error) {
+                // 原站播放器可能代理了媒体方法；清空容器仍会停止其显示。
+            }
+        });
+
+        const wrapper = document.createElement('div');
+        wrapper.id = ROUTE_PLAYER_ID;
+        Object.assign(wrapper.style, {
+            position: 'absolute',
+            inset: '0',
+            zIndex: '2147483646',
+            width: '100%',
+            height: '100%',
+            minHeight: `${playerHeight}px`,
+            overflow: 'hidden',
+            background: '#000'
+        });
+
+        const iframe = document.createElement('iframe');
+        iframe.src = routeUrl;
+        iframe.title = '授权线路播放器';
+        iframe.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
+        iframe.allowFullscreen = true;
+        Object.assign(iframe.style, {
+            display: 'block',
+            width: '100%',
+            height: '100%',
+            minHeight: `${playerHeight}px`,
+            border: '0',
+            background: '#000'
+        });
+        wrapper.appendChild(iframe);
+
+        if (computed.position === 'static') container.style.position = 'relative';
+        container.style.setProperty('overflow', 'hidden', 'important');
+        container.style.setProperty('min-height', `${playerHeight}px`, 'important');
+        container.replaceChildren(wrapper);
+        container.scrollIntoView({block: 'center', behavior: 'smooth'});
+    }
+
+    function renderSourcePage() {
+        let mediaInfo = extractMediaInfo();
+        let settings = getSettings();
+        let manualMode = false;
+        const root = createShell({
+            title: '天虫追剧助手',
+            subtitle: `${mediaInfo.platform} · 已识别当前页面`,
+            value: mediaInfo.query,
+            routes: AUTHORIZED_ROUTES,
+            settings
+        });
+        const input = root.querySelector('#tc-query');
+        const indexUnit = root.querySelector('#tc-index-unit');
+        const indexNumber = root.querySelector('#tc-index-number');
+        const meta = root.querySelector('.tc-meta');
+        const runButton = root.querySelector('[data-action="run-default"]');
+        const actionSelect = root.querySelector('[data-setting="action"]');
+        const routeSelect = root.querySelector('[data-setting="route"]');
+        const routeSettings = root.querySelector('.tc-route-settings');
+        const gearButton = root.querySelector('.tc-gear');
+        const subtitle = root.querySelector('.tc-subtitle');
+
+        function showSettingsView() {
+            root.classList.add('tc-open');
+            const settingsView = root.querySelector('.tc-settings-view');
+            if (settingsView?.hidden) gearButton?.click();
+        }
+
+        function getEffectiveSearch() {
+            const typedTitle = stripTitleDecorations(input.value);
+            const typedNumber = Number.parseInt(indexNumber.value, 10);
+            const hasTypedNumber = Number.isFinite(typedNumber) && typedNumber > 0;
+            const hasManualValue = Boolean(typedTitle || hasTypedNumber);
+            const title = stripTitleDecorations(
+                typedTitle || (manualMode ? '' : mediaInfo.title)
+            );
+            const episodeNumber = hasTypedNumber
+                ? typedNumber
+                : (hasManualValue ? null : mediaInfo.episodeNumber);
+            const unit = hasTypedNumber
+                ? (indexUnit.value || mediaInfo.indexUnit || '集')
+                : (hasManualValue ? '' : mediaInfo.indexUnit);
+            const suffix = episodeNumber ? `第${episodeNumber}${unit || '集'}` : '';
+            const variant = !hasManualValue && mediaInfo.episodeVariant !== '正片'
+                ? mediaInfo.episodeVariant
+                : '';
+
+            return {
+                title,
+                episodeNumber,
+                indexUnit: unit,
+                episodeVariant: variant,
+                query: cleanText([title, suffix, variant].filter(Boolean).join(' ')),
+                isManual: manualMode || hasManualValue,
+                changedTitle: Boolean(
+                    typedTitle
+                    && normalizeMatchText(typedTitle) !== normalizeMatchText(mediaInfo.title)
+                )
+            };
+        }
+
+        function updateMeta() {
+            if (manualMode) {
+                meta.textContent = '独立搜索：填写片名；需要时选择集、期、部或话';
+                input.placeholder = '输入片名或节目名';
+                input.title = '';
+                indexNumber.placeholder = '序号';
+                return;
+            }
+            const formattedDate = mediaInfo.airDate
+                ? mediaInfo.airDate.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')
+                : '';
+            const episodeDetails = [
+                mediaInfo.episode,
+                mediaInfo.episodeVariant,
+                formattedDate
+            ].filter(Boolean).join(' · ');
+            const typeLabel = {
+                movie: '电影',
+                tv: '电视剧',
+                variety: '综艺',
+                anime: '动漫'
+            }[mediaInfo.mediaType] || '';
+            meta.textContent = mediaInfo.episode
+                ? `实时识别：${mediaInfo.title || '未识别'} · ${typeLabel ? `${typeLabel} · ` : ''}${episodeDetails}`
+                : `实时识别：${mediaInfo.title || '未识别'}${typeLabel ? ` · ${typeLabel}` : ' · 集/期未识别'}`;
+            input.placeholder = mediaInfo.title || '输入片名或节目名';
+            input.title = mediaInfo.title || '';
+            indexNumber.placeholder = mediaInfo.episodeNumber || '序号';
+            subtitle.textContent = `${mediaInfo.platform} · 实时识别中`;
+        }
+
+        function updateDefaultButton() {
+            if (settings.defaultAction === 'target') {
+                runButton.textContent = '一键执行 · 跳转目标站';
+                return;
+            }
+            const route = AUTHORIZED_ROUTES[settings.defaultRouteIndex];
+            runButton.textContent = isRouteConfigured(route)
+                ? `一键执行 · ${route.name}`
+                : '一键执行 · 请先配置授权线路';
+        }
+
+        function openTargetSite() {
+            const search = getEffectiveSearch();
+            if (!search.query) {
+                setStatus(root, '请先填写片名或搜索关键词');
+                root.classList.add('tc-open');
+                input.focus();
+                return false;
+            }
+            const resolvedTitle = search.title;
+            if (!resolvedTitle || isGenericMediaTitle(resolvedTitle)) {
+                setStatus(root, '未识别到有效剧名，已阻止跳转；请点击“手动搜索”填写正确片名');
+                root.classList.add('tc-open');
+                return false;
+            }
+            const treatsIndexAsTitle = search.indexUnit === '部' && search.episodeNumber;
+            const pending = {
+                ...mediaInfo,
+                title: treatsIndexAsTitle ? search.query : resolvedTitle,
+                episodeNumber: treatsIndexAsTitle ? null : search.episodeNumber,
+                indexUnit: search.indexUnit,
+                airDate: search.isManual ? '' : mediaInfo.airDate,
+                episodeVariant: search.isManual && search.episodeNumber
+                    ? '正片'
+                    : (search.episodeVariant || mediaInfo.episodeVariant),
+                mediaType: search.changedTitle ? '' : mediaInfo.mediaType,
+                releaseYear: search.changedTitle ? '' : mediaInfo.releaseYear,
+                query: search.query,
+                createdAt: Date.now(),
+                completedAt: null
+            };
+            GM_setValue(PENDING_KEY, pending);
+            const searchUrl = `${TARGET_HOME}search/${encodeURIComponent(pending.title)}`;
+            GM_openInTab(searchUrl, {active: true, insert: true, setParent: true});
+            setStatus(root, `正在搜索：${pending.query}`);
+            return true;
+        }
+
+        async function openAuthorizedRoute(routeIndex) {
+            const route = AUTHORIZED_ROUTES[routeIndex];
+            const search = getEffectiveSearch();
+            try {
+                const routeUrl = buildAuthorizedRouteUrl(
+                    route,
+                    {
+                        ...mediaInfo,
+                        title: search.title || mediaInfo.title,
+                        episode: search.episodeNumber
+                            ? `第${search.episodeNumber}${search.indexUnit || '集'}`
+                            : ''
+                    },
+                    search.query
+                );
+                if (!routeUrl) {
+                    setStatus(root, '该授权线路尚未配置，请在脚本顶部填写');
+                    showSettingsView();
+                    return false;
+                }
+                setStatus(root, `正在载入：${route.name}`);
+                await showAuthorizedRouteInPlayer(routeUrl);
+                setStatus(root, `已在原播放窗口载入：${route.name}`);
+                root.classList.remove('tc-open');
+                return true;
+            } catch (error) {
+                root.classList.add('tc-open');
+                setStatus(root, error?.message || '授权线路无法在原播放窗口载入');
+                return false;
+            }
+        }
+
+        updateMeta();
+        updateDefaultButton();
+        root.querySelector('[data-action="refresh"]').addEventListener('click', () => {
+            manualMode = false;
+            mediaInfo = extractMediaInfo();
+            input.value = '';
+            indexUnit.value = '';
+            indexNumber.value = '';
+            updateMeta();
+            setStatus(root, '已立即更新识别结果');
+        });
+        root.querySelector('[data-action="manual"]').addEventListener('click', () => {
+            manualMode = true;
+            mediaInfo = {
+                platform: '手动搜索',
+                title: '',
+                episode: '',
+                query: '',
+                sourceUrl: location.href,
+                createdAt: Date.now()
+            };
+            input.value = '';
+            indexUnit.value = '';
+            indexNumber.value = '';
+            updateMeta();
+            setStatus(root, '请输入想查找的内容，然后点击“一键执行”');
+            input.focus();
+        });
+        root.querySelector('[data-action="open"]').addEventListener('click', openTargetSite);
+        runButton.addEventListener('click', () => {
+            if (settings.defaultAction === 'route') {
+                openAuthorizedRoute(settings.defaultRouteIndex);
+            } else {
+                openTargetSite();
+            }
+        });
+        [input, indexNumber].forEach((field) => {
+            field.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    runButton.click();
+                }
+            });
+        });
+        actionSelect.addEventListener('change', () => {
+            settings = {
+                ...getSettings(),
+                defaultAction: actionSelect.value === 'route' ? 'route' : 'target'
+            };
+            saveSettings(settings);
+            routeSettings.hidden = settings.defaultAction !== 'route';
+            updateDefaultButton();
+            setStatus(root, '默认操作已保存');
+        });
+        routeSelect.addEventListener('change', () => {
+            settings = {
+                ...getSettings(),
+                defaultRouteIndex: Number(routeSelect.value)
+            };
+            saveSettings(settings);
+            updateDefaultButton();
+            setStatus(root, '默认授权线路已保存');
+        });
+        root.querySelectorAll('[data-route-index]').forEach((button) => {
+            button.addEventListener('click', () => {
+                openAuthorizedRoute(Number(button.dataset.routeIndex));
+            });
+        });
+
+        let lastFingerprint = [
+            mediaInfo.title,
+            mediaInfo.episode,
+            mediaInfo.episodeVariant,
+            mediaInfo.airDate,
+            mediaInfo.mediaType,
+            mediaInfo.releaseYear,
+            mediaInfo.sourceUrl
+        ].join('|');
+        setInterval(() => {
+            if (manualMode) return;
+            const nextMediaInfo = extractMediaInfo();
+            const nextFingerprint = [
+                nextMediaInfo.title,
+                nextMediaInfo.episode,
+                nextMediaInfo.episodeVariant,
+                nextMediaInfo.airDate,
+                nextMediaInfo.mediaType,
+                nextMediaInfo.releaseYear,
+                nextMediaInfo.sourceUrl
+            ].join('|');
+            if (nextFingerprint === lastFingerprint) return;
+            mediaInfo = nextMediaInfo;
+            lastFingerprint = nextFingerprint;
+            updateMeta();
+        }, 1000);
+    }
+
+    function normalizeMatchText(value) {
+        return cleanText(value)
+            .toLocaleLowerCase()
+            .replace(/[\s·:：\-—_《》【】()[\]（）]/g, '');
+    }
+
+    function getEpisodeDescriptorFromLink(link) {
+        const labelParts = [
+            link.querySelector?.('.episode-ctn')?.getAttribute('title'),
+            link.getAttribute?.('title'),
+            link.textContent
+        ]
+            .map((value) => cleanText(value))
+            .filter(Boolean);
+        const label = [...new Set(labelParts)].join(' ');
+        const match = label.match(/第\s*0*(\d{1,4})\s*[集期话部]/)
+            || labelParts
+                .map((part) => part.match(/^0*(\d{1,4})$/))
+                .find(Boolean);
+        return {
+            number: match ? Number(match[1]) : null,
+            airDate: extractAirDate(label),
+            variant: extractEpisodeVariant(label),
+            label
+        };
+    }
+
+    function findEpisodeLink(root, pending) {
+        const episodeNumber = Number(pending?.episodeNumber);
+        const wantedDate = pending?.airDate || '';
+        const wantedVariant = pending?.episodeVariant || '正片';
+        let best = null;
+
+        [...root.querySelectorAll('a[href*="/play/"]')].forEach((link) => {
+            const descriptor = getEpisodeDescriptorFromLink(link);
+            if (descriptor.number !== episodeNumber) return;
+            if (wantedVariant && descriptor.variant !== wantedVariant) return;
+
+            let score = 100;
+            if (wantedDate) {
+                if (descriptor.airDate === wantedDate) score += 240;
+                else if (descriptor.airDate) score -= 180;
+                else score -= 35;
+            }
+            if (descriptor.variant === wantedVariant) {
+                score += 120;
+            }
+            if (descriptor.variant === '正片') score += 20;
+
+            if (!best || score > best.score) best = {link, score, descriptor};
+        });
+        return best?.link || null;
+    }
+
+    function getTargetResultInfo(link) {
+        const container = link.closest(
+            'app-video-teaser-searchresult, .video-detail'
+        ) || link.parentElement;
+        const text = cleanText(container?.textContent);
+        const episodeCount = container
+            ? container.querySelectorAll('a[href*="/play/"] .episode-ctn').length
+            : 0;
+        let mediaType = '';
+        if (/电影/.test(text)) mediaType = 'movie';
+        else if (/综艺|真人秀/.test(text)) mediaType = 'variety';
+        else if (/动漫|动画|国创/.test(text)) mediaType = 'anime';
+        else if (/电视剧|短剧|连续剧/.test(text)) mediaType = 'tv';
+        return {
+            container,
+            text,
+            episodeCount,
+            mediaType,
+            releaseYear: extractReleaseYear(text)
+        };
+    }
+
+    function selectExactTargetTitleLink(pending) {
+        const wantedTitle = normalizeMatchText(pending?.title);
+        const candidates = [...document.querySelectorAll('a.result-nav-link')]
+            .filter((link) => (
+                normalizeMatchText(link.textContent) === wantedTitle
+                && /\/play\//.test(link.href)
+            ))
+            .map((link) => {
+                const info = getTargetResultInfo(link);
+                let score = 100;
+                if (pending.mediaType) {
+                    if (info.mediaType === pending.mediaType) score += 260;
+                    else if (info.mediaType) score -= 260;
+                }
+                if (pending.mediaType === 'movie') {
+                    score += info.episodeCount > 1 ? -320 : 100;
+                } else if (pending.mediaType && info.episodeCount > 0) {
+                    score += 40;
+                }
+                if (pending.releaseYear) {
+                    if (info.releaseYear === pending.releaseYear) score += 140;
+                    else if (info.releaseYear) score -= 80;
+                }
+                return {link, info, score};
+            })
+            .sort((left, right) => right.score - left.score);
+
+        if (!candidates.length) return null;
+        const best = candidates[0];
+        const incompatibleMovie = pending.mediaType === 'movie'
+            && (best.info.episodeCount > 1 || (best.info.mediaType && best.info.mediaType !== 'movie'));
+        const incompatibleType = pending.mediaType
+            && best.info.mediaType
+            && best.info.mediaType !== pending.mediaType;
+
+        return {
+            ...best,
+            compatible: !incompatibleMovie && !incompatibleType
+        };
+    }
+
+    function findExactTargetDestination(pending) {
+        const wantedTitle = normalizeMatchText(pending?.title);
+        if (!wantedTitle) return null;
+
+        const selectedResult = selectExactTargetTitleLink(pending);
+        if (!selectedResult) return null;
+        if (!selectedResult.compatible) {
+            return {
+                blocked: true,
+                label: `找到同名《${pending.title}》，但内容类型与源页面不一致，已停止自动跳转`
+            };
+        }
+        const {link: titleLink, info} = selectedResult;
+
+        const episodeNumber = Number(pending?.episodeNumber);
+        if (!Number.isFinite(episodeNumber) || episodeNumber <= 0) {
+            return {href: titleLink.href, label: pending.title};
+        }
+
+        const resultContainer = info.container;
+        if (!resultContainer) return null;
+
+        const episodeLink = findEpisodeLink(resultContainer, pending);
+
+        const unit = pending.indexUnit || '集';
+        return episodeLink
+            ? {href: episodeLink.href, label: `${pending.title} 第${episodeNumber}${unit}`}
+            : {
+                href: titleLink.href,
+                label: `进入《${pending.title}》完整选集继续定位`,
+                intermediate: true
+            };
+    }
+
+    function autoOpenExactTarget(pending, root) {
+        const isSearchPage = location.pathname.startsWith('/search/');
+        const isSeriesPage = location.pathname.startsWith('/play/')
+            && pending?.stage === 'series';
+        if (
+            !pending
+            || pending.completedAt
+            || (!isSearchPage && !isSeriesPage)
+            || Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000
+        ) {
+            return;
+        }
+
+        let attempts = 0;
+        const timer = setInterval(() => {
+            attempts += 1;
+            const destination = isSearchPage
+                ? findExactTargetDestination(pending)
+                : (() => {
+                    const episodeNumber = Number(pending.episodeNumber);
+                    const episodeLink = findEpisodeLink(document, pending);
+                    return episodeLink
+                        ? {
+                            href: episodeLink.href,
+                            label: `${pending.title} 第${episodeNumber}${pending.indexUnit || '集'}`
+                        }
+                        : null;
+                })();
+            if (destination?.blocked) {
+                clearInterval(timer);
+                setStatus(root, destination.label);
+                root.classList.add('tc-open');
+                return;
+            }
+            if (destination?.href) {
+                clearInterval(timer);
+                if (destination.intermediate) {
+                    GM_setValue(PENDING_KEY, {
+                        ...pending,
+                        stage: 'series',
+                        seriesUrl: destination.href
+                    });
+                    setStatus(root, destination.label);
+                    location.assign(destination.href);
+                    return;
+                }
+                GM_setValue(PENDING_KEY, {
+                    ...pending,
+                    stage: 'complete',
+                    completedAt: Date.now()
+                });
+                setStatus(root, `已精确定位：${destination.label}`);
+                location.assign(destination.href);
+                return;
+            }
+            if (attempts >= 15) {
+                clearInterval(timer);
+                setStatus(
+                    root,
+                    isSeriesPage
+                        ? `已进入《${pending.title}》，但完整选集尚未加载出第${pending.episodeNumber}${pending.indexUnit || '集'}`
+                        : '未找到完全同名资源，已停留在搜索结果页供你确认'
+                );
+                root.classList.add('tc-open');
+            }
+        }, 400);
+    }
+
+    function renderTargetPage() {
+        let pending = GM_getValue(PENDING_KEY, null);
+        const cleanedPendingTitle = stripTitleDecorations(pending?.title);
+        if (pending?.title && cleanedPendingTitle !== pending.title) {
+            pending = {
+                ...pending,
+                title: cleanedPendingTitle,
+                query: cleanText(String(pending.query || '').replace(pending.title, cleanedPendingTitle)),
+                createdAt: Date.now(),
+                completedAt: null
+            };
+            GM_setValue(PENDING_KEY, pending);
+            if (location.pathname.startsWith('/search/')) {
+                location.replace(`${TARGET_HOME}search/${encodeURIComponent(cleanedPendingTitle)}`);
+                return;
+            }
+        }
+        const query = cleanText(pending?.query || '');
+        const root = createShell({
+            title: '天虫追剧助手',
+            subtitle: '目标站 · 自动定位中',
+            value: query,
+            targetMode: true
+        });
+        const input = root.querySelector('#tc-query');
+        const indexNumber = root.querySelector('#tc-index-number');
+        const indexUnit = root.querySelector('#tc-index-unit');
+        const meta = root.querySelector('.tc-meta');
+        const unit = pending?.indexUnit || '集';
+        if (pending?.indexUnit) indexUnit.value = pending.indexUnit;
+        const formattedDate = pending?.airDate
+            ? pending.airDate.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')
+            : '';
+        const targetDetails = [
+            {
+                movie: '电影',
+                tv: '电视剧',
+                variety: '综艺',
+                anime: '动漫'
+            }[pending?.mediaType],
+            pending?.releaseYear,
+            pending?.episodeNumber ? `第${pending.episodeNumber}${unit}` : '',
+            pending?.episodeVariant,
+            formattedDate
+        ].filter(Boolean).join(' · ');
+        meta.textContent = pending?.platform
+            ? `来源：${pending.platform}　目标：${pending.title || query}${targetDetails ? ` · ${targetDetails}` : ''}`
+            : '未收到来源页面信息，可手动输入关键词';
+
+        let targetFieldsEdited = false;
+        [input, indexNumber, indexUnit].forEach((field) => {
+            field.addEventListener('input', () => {
+                targetFieldsEdited = true;
+            });
+            field.addEventListener('change', () => {
+                targetFieldsEdited = true;
+            });
+        });
+
+        root.querySelector('[data-action="fill"]').addEventListener('click', () => {
+            const title = stripTitleDecorations(
+                cleanText(input.value)
+                || pending?.title
+                || parseSearchIntent(query).title
+            );
+            const typedNumber = Number.parseInt(indexNumber.value, 10);
+            const episodeNumber = Number.isFinite(typedNumber) && typedNumber > 0
+                ? typedNumber
+                : pending?.episodeNumber;
+            const selectedUnit = indexUnit.value || pending?.indexUnit || (episodeNumber ? '集' : '');
+            if (!title) {
+                setStatus(root, '请输入片名或节目名');
+                return;
+            }
+            const changedTitle = Boolean(
+                cleanText(input.value)
+                && normalizeMatchText(input.value) !== normalizeMatchText(pending?.title)
+            );
+            const nextPending = {
+                ...(pending || {}),
+                title,
+                episodeNumber: episodeNumber || null,
+                indexUnit: selectedUnit,
+                episodeVariant: targetFieldsEdited && episodeNumber
+                    ? '正片'
+                    : (pending?.episodeVariant || (episodeNumber ? '正片' : '')),
+                airDate: targetFieldsEdited ? '' : (pending?.airDate || ''),
+                mediaType: changedTitle ? '' : (pending?.mediaType || ''),
+                releaseYear: changedTitle ? '' : (pending?.releaseYear || ''),
+                query: cleanText([
+                    title,
+                    episodeNumber ? `第${episodeNumber}${selectedUnit || '集'}` : ''
+                ].filter(Boolean).join(' ')),
+                createdAt: Date.now(),
+                completedAt: null,
+                stage: null
+            };
+            GM_setValue(PENDING_KEY, nextPending);
+            setStatus(root, `正在重新定位：${nextPending.query}`);
+            location.assign(`${TARGET_HOME}search/${encodeURIComponent(title)}`);
+        });
+
+        if (query) root.classList.add('tc-open');
+        autoOpenExactTarget(pending, root);
+    }
+
+    if (location.hostname === TARGET_HOST) renderTargetPage();
+    else renderSourcePage();
+})();

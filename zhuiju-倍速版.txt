@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         天虫
 // @namespace    https://github.com/local/tianchong-video-navigator
-// @version      2.0.0
-// @description  从主流视频页面提取片名与集数，辅助在目标站搜索，并提供通用视频倍速与画中画控制。
+// @version      1.9.9
+// @description  从主流视频页面提取片名与集数，辅助在目标站搜索，并提供通用视频倍速控制。
 // @author       jtl66
 // @match        *://*/*
 // @match        https://v.qq.com/*
@@ -32,7 +32,7 @@
     const PENDING_KEY = 'tc_pending_search';
     const SETTINGS_KEY = 'tc_helper_settings';
     const MAX_TITLE_LENGTH = 100;
-    const SCRIPT_VERSION = '2.0.0';
+    const SCRIPT_VERSION = '1.9.9';
     const DEFAULT_FADE_SECONDS = 10;
     const SPEED_AUTO_CLOSE_MS = 1500;
     const MAX_PANEL_OPEN_MS = 10000;
@@ -42,13 +42,9 @@
     const TENCENT_SPEED_CONTROL_ENABLED = false;
     const ROUTE_PLAYER_ID = 'tc-authorized-route-player';
     const FRAME_CONTROL_MESSAGE = 'tc-playback-controller';
-    const FRAME_PIP_MESSAGE = 'tc-pip-controller';
     const PLAYBACK_RATE_PRESETS = [0.5, 1, 1.5, 2, 2.5, 3];
     const MIN_PLAYBACK_RATE = 0.1;
     const MAX_PLAYBACK_RATE = 16;
-    const TENCENT_PIP_SEEK_SECONDS = 10;
-    const MIN_PIP_WIDTH = 240;
-    const MIN_PIP_HEIGHT = 135;
 
     /*
      * ==================== 自有/授权接口配置区 ====================
@@ -316,9 +312,6 @@
             pointer-events: auto;
         }
         #${APP_ID}.tc-open .tc-panel { display: block; }
-        #${APP_ID}.tc-settings-open .tc-panel {
-            width: min(340px, calc(100vw - 16px));
-        }
         #${APP_ID}.tc-speed-modal .tc-panel {
             filter: blur(5px) saturate(.72);
             opacity: .42;
@@ -360,7 +353,6 @@
         #${APP_ID} .tc-close,
         #${APP_ID} .tc-gear,
         #${APP_ID} .tc-speed-toggle,
-        #${APP_ID} .tc-pip-toggle,
         #${APP_ID} .tc-back-head {
             width: 28px;
             height: 28px;
@@ -377,22 +369,6 @@
             font-size: 11px;
             font-weight: 750;
             letter-spacing: -.2px;
-        }
-        #${APP_ID} .tc-pip-toggle {
-            color: #e7fff8;
-        }
-        #${APP_ID} .tc-pip-toggle svg {
-            display: block;
-            width: 16px;
-            height: 16px;
-            margin: auto;
-            fill: currentColor;
-        }
-        #${APP_ID} .tc-pip-toggle:hover,
-        #${APP_ID} .tc-pip-toggle.tc-active {
-            color: #fff;
-            background: linear-gradient(120deg, rgba(94,230,184,.66), rgba(108,99,255,.76));
-            box-shadow: 0 5px 14px rgba(94,230,184,.18);
         }
         #${APP_ID} .tc-speed-toggle:hover,
         #${APP_ID} .tc-speed-toggle.tc-active {
@@ -520,14 +496,14 @@
         #${APP_ID} .tc-run { width: 100%; margin-top: 7px; }
         #${APP_ID} .tc-settings-view { min-height: 0; }
         #${APP_ID} .tc-settings-title {
-            margin-bottom: 6px;
+            margin-bottom: 10px;
             color: #e2e8f0;
             font-size: 14px;
             font-weight: 700;
         }
         #${APP_ID} .tc-settings-body {
             display: grid;
-            gap: 6px;
+            gap: 8px;
         }
         #${APP_ID} .tc-route-settings {
             display: grid;
@@ -538,7 +514,7 @@
         }
         #${APP_ID} .tc-setting-label {
             display: grid;
-            gap: 3px;
+            gap: 5px;
             color: var(--tc-muted);
             font-size: 11px;
         }
@@ -546,13 +522,7 @@
             display: grid;
             grid-template-columns: 1fr 84px;
             align-items: center;
-            gap: 8px;
-        }
-        #${APP_ID} .tc-setting-wide-inline {
-            display: grid;
-            grid-template-columns: 76px minmax(0, 1fr);
-            align-items: center;
-            gap: 8px;
+            gap: 10px;
         }
         #${APP_ID} .tc-setting-check {
             display: flex;
@@ -569,7 +539,7 @@
         }
         #${APP_ID} .tc-select {
             width: 100%;
-            height: 32px;
+            height: 34px;
             padding: 0 8px;
             border: 1px solid var(--tc-line);
             border-radius: 9px;
@@ -1186,11 +1156,6 @@
                 ? Math.min(10, Math.max(0, Number(stored.fadeSeconds)))
                 : DEFAULT_FADE_SECONDS,
             edgeSnap: stored?.edgeSnap !== false,
-            autoPiP: stored?.autoPiP !== false,
-            pipSeekSeconds: TENCENT_PIP_SEEK_SECONDS,
-            pipWidth: 640,
-            pipHeight: 360,
-            pipDanmaku: false,
             launcherPosition: stored?.launcherPosition
                 && Number.isFinite(Number(stored.launcherPosition.x))
                 && Number.isFinite(Number(stored.launcherPosition.y))
@@ -1588,151 +1553,12 @@
     }
 
     function startEmbeddedFrameSpeedController() {
+        if (!isPlaybackControlSupportedHere()) return;
         let framePlaybackRate = getSettings().playbackRate;
-        let frameControllerEnabled = isPlaybackControlSupportedHere();
+        let frameControllerEnabled = true;
         let scanTimer = 0;
-        let tencentPiPButton = null;
-        let frameAutomaticPiPActive = false;
-        let framePiPRestoreTimer = 0;
         const managedVideos = new WeakSet();
         ensureTencentPlaybackGuard(framePlaybackRate, frameControllerEnabled);
-        const getFramePiPVideo = () => [...collectVideosInOpenTrees(document)]
-            .filter((video) => video.readyState > 0)
-            .sort((left, right) => {
-                const leftRect = left.getBoundingClientRect();
-                const rightRect = right.getBoundingClientRect();
-                const leftScore = (left.paused ? 0 : 1e12) + leftRect.width * leftRect.height;
-                const rightScore = (right.paused ? 0 : 1e12) + rightRect.width * rightRect.height;
-                return rightScore - leftScore;
-            })[0] || null;
-        const reportFramePiP = (active, error = '') => {
-            try {
-                window.parent.postMessage({
-                    source: APP_ID,
-                    type: FRAME_PIP_MESSAGE,
-                    action: 'state',
-                    active,
-                    error
-                }, '*');
-            } catch (postError) {}
-        };
-        const relayFramePiP = (action) => {
-            document.querySelectorAll('iframe').forEach((frame) => {
-                try {
-                    frame.contentWindow?.postMessage({
-                        source: APP_ID,
-                        type: FRAME_PIP_MESSAGE,
-                        action
-                    }, '*');
-                } catch (error) {}
-            });
-        };
-        const enterFramePiP = async (automatic = false) => {
-            if (document.pictureInPictureElement) {
-                reportFramePiP(true);
-                return true;
-            }
-            const video = getFramePiPVideo();
-            if (!video || video.paused) return false;
-            if (!video.requestPictureInPicture) {
-                reportFramePiP(false, '跨域播放器不支持原生画中画');
-                return false;
-            }
-            try {
-                video.disablePictureInPicture = false;
-                video.removeAttribute('disablepictureinpicture');
-                video.autoPictureInPicture = true;
-                video.setAttribute('autopictureinpicture', '');
-                await video.requestPictureInPicture();
-                frameAutomaticPiPActive = Boolean(automatic);
-                video.addEventListener('leavepictureinpicture', () => {
-                    frameAutomaticPiPActive = false;
-                    reportFramePiP(false);
-                }, {once: true});
-                reportFramePiP(true);
-                return true;
-            } catch (error) {
-                reportFramePiP(false, error?.message || '跨域播放器拒绝画中画');
-                return false;
-            }
-        };
-        const exitFramePiP = async () => {
-            clearTimeout(framePiPRestoreTimer);
-            framePiPRestoreTimer = 0;
-            frameAutomaticPiPActive = false;
-            if (!document.pictureInPictureElement) return;
-            try {
-                await document.exitPictureInPicture();
-            } catch (error) {}
-            reportFramePiP(false);
-        };
-        const isTencentPlaybackFrame = () => (
-            /(^|\.)(qq\.com|gtimg\.com)$/i.test(location.hostname)
-            || /(^|\.)v\.qq\.com$/i.test(location.hostname)
-            || /https?:\/\/(?:[^/]+\.)?v\.qq\.com\//i.test(document.referrer)
-        );
-        const positionTencentPiPButton = () => {
-            if (!tencentPiPButton) return;
-            const video = getFramePiPVideo();
-            if (!video) {
-                tencentPiPButton.hidden = true;
-                return;
-            }
-            const rect = video.getBoundingClientRect();
-            tencentPiPButton.hidden = rect.width < 160 || rect.height < 90;
-            if (tencentPiPButton.hidden) return;
-            tencentPiPButton.style.left = `${Math.max(8, rect.right - 92)}px`;
-            tencentPiPButton.style.top = `${Math.max(8, rect.top + 12)}px`;
-        };
-        const ensureTencentPiPButton = () => {
-            if (!isTencentPlaybackFrame() || tencentPiPButton) {
-                positionTencentPiPButton();
-                return;
-            }
-            const video = getFramePiPVideo();
-            if (!video) return;
-            tencentPiPButton = document.createElement('button');
-            tencentPiPButton.type = 'button';
-            tencentPiPButton.textContent = '画中画';
-            tencentPiPButton.title = '开启腾讯视频原生画中画';
-            Object.assign(tencentPiPButton.style, {
-                position: 'fixed',
-                zIndex: '2147483647',
-                width: '72px',
-                height: '32px',
-                padding: '0',
-                border: '1px solid rgba(255,255,255,.42)',
-                borderRadius: '9px',
-                color: '#fff',
-                background: 'rgba(15,23,42,.72)',
-                boxShadow: '0 5px 18px rgba(0,0,0,.28)',
-                backdropFilter: 'blur(8px)',
-                cursor: 'pointer',
-                font: '12px/30px "Microsoft YaHei",sans-serif'
-            });
-            tencentPiPButton.addEventListener('click', async (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                const opened = await enterFramePiP();
-                if (!opened) {
-                    tencentPiPButton.title = '腾讯播放器拒绝画中画，请确认视频正在播放';
-                }
-            });
-            document.body.appendChild(tencentPiPButton);
-            positionTencentPiPButton();
-        };
-        const syncFrameAutoPiPAction = () => {
-            if (!navigator.mediaSession) return;
-            try {
-                navigator.mediaSession.setActionHandler(
-                    'enterpictureinpicture',
-                    getSettings().autoPiP ? () => enterFramePiP(true) : null
-                );
-            } catch (error) {
-                // 当前浏览器尚未开放自动画中画 Media Session 动作。
-            }
-        };
-        syncFrameAutoPiPAction();
 
         const setFrameVideoRate = (video) => {
             if (!frameControllerEnabled) return;
@@ -1763,12 +1589,7 @@
                     'playing',
                     'ratechange'
                 ].forEach((eventName) => {
-                    video.addEventListener(eventName, () => {
-                        setFrameVideoRate(video);
-                        if (eventName === 'play' || eventName === 'playing') {
-                            window.setTimeout(syncFrameAutoPiPAction, 0);
-                        }
-                    });
+                    video.addEventListener(eventName, () => setFrameVideoRate(video));
                 });
             }
             setFrameVideoRate(video);
@@ -1805,54 +1626,21 @@
             {childList: true, subtree: true}
         );
         window.setInterval(() => {
-            if (!document.hidden) {
-                scanFrameVideos();
-            }
+            if (!document.hidden) scanFrameVideos();
         }, getPlaybackGuardInterval());
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
-                scanFrameVideos();
-                clearTimeout(framePiPRestoreTimer);
-                framePiPRestoreTimer = window.setTimeout(() => {
-                    exitFramePiP();
-                    relayFramePiP('exit');
-                }, 550);
-            } else if (getSettings().autoPiP) {
-                enterFramePiP(true);
-                relayFramePiP('enter');
-            }
+            if (!document.hidden) scanFrameVideos();
         });
         window.addEventListener('message', (event) => {
             const message = event.data;
-            if (message?.source !== APP_ID) return;
             if (
-                message?.type === FRAME_PIP_MESSAGE
-                && message.action === 'state'
-                && event.source !== window.parent
+                event.source !== window.parent
+                || message?.source !== APP_ID
+                || message?.type !== FRAME_CONTROL_MESSAGE
             ) {
-                try {
-                    window.parent.postMessage(message, '*');
-                } catch (error) {}
                 return;
             }
-            if (event.source !== window.parent) return;
-            if (message?.type === FRAME_PIP_MESSAGE) {
-                if (message.action === 'enter') {
-                    enterFramePiP();
-                    relayFramePiP('enter');
-                } else if (message.action === 'exit') {
-                    exitFramePiP();
-                    relayFramePiP('exit');
-                }
-                else if (message.action === 'toggle') {
-                    if (document.pictureInPictureElement) exitFramePiP();
-                    else enterFramePiP();
-                    relayFramePiP('toggle');
-                }
-                return;
-            }
-            if (message?.type !== FRAME_CONTROL_MESSAGE) return;
-            frameControllerEnabled = isPlaybackControlSupportedHere() && message.enabled !== false;
+            frameControllerEnabled = message.enabled !== false;
             const nextRate = Number(message.rate);
             if (
                 Number.isFinite(nextRate)
@@ -1865,7 +1653,6 @@
         });
         if (typeof GM_addValueChangeListener === 'function') {
             GM_addValueChangeListener(SETTINGS_KEY, (_key, _oldValue, newValue) => {
-                syncFrameAutoPiPAction();
                 const nextRate = Number(newValue?.playbackRate);
                 if (
                     Number.isFinite(nextRate)
@@ -1919,9 +1706,6 @@
                     </div>
                     <div class="tc-head-actions">
                         <button class="tc-back-head" type="button" aria-label="返回主界面" title="返回主界面" hidden>←</button>
-                        <button class="tc-pip-toggle" type="button" aria-label="开启画中画" title="开启画中画">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 7h-8v6H5V5h14v2Zm2-6H3a2 2 0 0 0-2 2v12h2V3h18v14h-8v2h8a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2Zm-10 14H1v8h10v-8Z"/></svg>
-                        </button>
                         <button class="tc-speed-toggle" type="button" aria-label="调节视频倍速" title="调节视频倍速">${settings.playbackRate}×</button>
                         <button class="tc-gear" type="button" aria-label="设置" title="设置">⚙</button>
                         <button class="tc-close" type="button" aria-label="收起助手窗口" title="收起助手窗口">×</button>
@@ -1980,7 +1764,7 @@
                     <div class="tc-settings-title">助手设置</div>
                     <div class="tc-settings-body">
                         ${targetMode ? '' : `
-                            <label class="tc-setting-label tc-setting-wide-inline">
+                            <label class="tc-setting-label">
                                 默认操作
                                 <select class="tc-select" data-setting="action">
                                     <option value="target" ${settings.defaultAction === 'target' ? 'selected' : ''}>跳转目标站</option>
@@ -1995,10 +1779,6 @@
                         <label class="tc-setting-check">
                             <span>松手后自动吸附屏幕边缘</span>
                             <input data-setting="edge-snap" type="checkbox" ${settings.edgeSnap ? 'checked' : ''}>
-                        </label>
-                        <label class="tc-setting-check">
-                            <span>离开播放页面时自动画中画</span>
-                            <input data-setting="auto-pip" type="checkbox" ${settings.autoPiP ? 'checked' : ''}>
                         </label>
                         ${targetMode ? '' : `
                             <div class="tc-route-settings" ${settings.defaultAction === 'route' ? '' : 'hidden'}>
@@ -2083,7 +1863,6 @@
         const launcher = root.querySelector('.tc-launcher');
         const launcherDismiss = root.querySelector('.tc-launcher-dismiss');
         const panel = root.querySelector('.tc-panel');
-        const pipToggle = root.querySelector('.tc-pip-toggle');
         const speedToggle = root.querySelector('.tc-speed-toggle');
         const speedPopover = root.querySelector('.tc-speed-popover');
         const speedClose = root.querySelector('.tc-speed-close');
@@ -2100,17 +1879,6 @@
         let panelHardCloseTimer = 0;
         let panelOpenedAt = 0;
         let suppressNextClick = false;
-        let pipWindow = null;
-        let pipVideo = null;
-        let pipPlaceholder = null;
-        let pipMovedElement = null;
-        let pipOriginalStyle = null;
-        let pipMovedLayers = [];
-        let pipResizeTimer = 0;
-        let mediaSessionVideo = null;
-        let previousMediaMetadata = null;
-        let automaticPiPActive = false;
-        let automaticPiPRestoreTimer = 0;
         const managedVideos = new WeakSet();
         const managedFrames = new WeakSet();
         ensureTencentPlaybackGuard(currentPlaybackRate, playbackControllerEnabled);
@@ -2181,798 +1949,6 @@
             });
             return [...videos];
         };
-        const broadcastFramePiP = (action) => {
-            document.querySelectorAll('iframe').forEach((frame) => {
-                try {
-                    frame.contentWindow?.postMessage({
-                        source: APP_ID,
-                        type: FRAME_PIP_MESSAGE,
-                        action
-                    }, '*');
-                } catch (error) {}
-            });
-        };
-        const getBestPiPVideo = () => {
-            return collectPageVideos()
-                .filter((video) => video.readyState > 0)
-                .sort((left, right) => {
-                    const leftRect = left.getBoundingClientRect();
-                    const rightRect = right.getBoundingClientRect();
-                    const leftScore = (left.paused ? 0 : 1e12) + leftRect.width * leftRect.height;
-                    const rightScore = (right.paused ? 0 : 1e12) + rightRect.width * rightRect.height;
-                    return rightScore - leftScore;
-                })[0] || null;
-        };
-        const seekPiPVideo = (delta) => {
-            if (!pipVideo) return;
-            const duration = Number(pipVideo.duration);
-            const maximum = Number.isFinite(duration) ? duration : Number.MAX_SAFE_INTEGER;
-            pipVideo.currentTime = Math.min(maximum, Math.max(0, pipVideo.currentTime + delta));
-        };
-        const clearMediaSessionPiPActions = () => {
-            if (!navigator.mediaSession || !mediaSessionVideo) return;
-            if (mediaSessionVideo) {
-                [
-                    'timeupdate',
-                    'durationchange',
-                    'ratechange',
-                    'play',
-                    'pause',
-                    'seeked'
-                ].forEach((eventName) => {
-                    mediaSessionVideo.removeEventListener(eventName, syncPiPMediaPosition);
-                });
-            }
-            mediaSessionVideo = null;
-            ['play', 'pause', 'seekbackward', 'seekforward', 'seekto'].forEach((action) => {
-                try {
-                    navigator.mediaSession.setActionHandler(action, null);
-                } catch (error) {}
-            });
-            try {
-                navigator.mediaSession.metadata = previousMediaMetadata;
-            } catch (error) {}
-            previousMediaMetadata = null;
-        };
-        function syncPiPMediaPosition() {
-            if (!navigator.mediaSession || !mediaSessionVideo) return;
-            const duration = Number(mediaSessionVideo.duration);
-            const position = Number(mediaSessionVideo.currentTime);
-            const playbackRate = Number(mediaSessionVideo.playbackRate);
-            try {
-                navigator.mediaSession.playbackState = mediaSessionVideo.paused ? 'paused' : 'playing';
-                if (Number.isFinite(duration) && duration > 0 && Number.isFinite(position)) {
-                    navigator.mediaSession.setPositionState({
-                        duration,
-                        playbackRate: Number.isFinite(playbackRate) && playbackRate > 0
-                            ? playbackRate
-                            : 1,
-                        position: Math.min(duration, Math.max(0, position))
-                    });
-                }
-            } catch (error) {}
-        }
-        const installMediaSessionPiPActions = () => {
-            if (!navigator.mediaSession || !pipVideo) return;
-            mediaSessionVideo = pipVideo;
-            previousMediaMetadata = navigator.mediaSession.metadata;
-            try {
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: cleanText(document.title) || location.hostname,
-                    artist: location.hostname
-                });
-            } catch (error) {}
-            const seekSeconds = () => Number(runtimeSettings.pipSeekSeconds) || 10;
-            const handlers = {
-                play: () => pipVideo?.play(),
-                pause: () => pipVideo?.pause(),
-                seekbackward: (details) => seekPiPVideo(-(details.seekOffset || seekSeconds())),
-                seekforward: (details) => seekPiPVideo(details.seekOffset || seekSeconds()),
-                seekto: (details) => {
-                    if (!pipVideo || !Number.isFinite(Number(details.seekTime))) return;
-                    if (details.fastSeek && typeof pipVideo.fastSeek === 'function') {
-                        pipVideo.fastSeek(details.seekTime);
-                    } else {
-                        pipVideo.currentTime = details.seekTime;
-                    }
-                }
-            };
-            Object.entries(handlers).forEach(([action, handler]) => {
-                try {
-                    navigator.mediaSession.setActionHandler(action, handler);
-                } catch (error) {}
-            });
-            [
-                'timeupdate',
-                'durationchange',
-                'ratechange',
-                'play',
-                'pause',
-                'seeked'
-            ].forEach((eventName) => {
-                mediaSessionVideo.addEventListener(eventName, syncPiPMediaPosition);
-            });
-            syncPiPMediaPosition();
-        };
-        const updatePiPToggle = (active, label = '') => {
-            pipToggle.classList.toggle('tc-active', active);
-            pipToggle.title = active ? '退出画中画' : (label || '开启画中画');
-            pipToggle.setAttribute('aria-label', pipToggle.title);
-        };
-        const refreshVideoSurface = (video) => {
-            if (!video?.isConnected) return;
-            const ownerWindow = video.ownerDocument?.defaultView || window;
-            const previousOpacity = video.style.getPropertyValue('opacity');
-            const previousPriority = video.style.getPropertyPriority('opacity');
-            video.style.setProperty('opacity', '0.999', 'important');
-            void video.offsetHeight;
-            ownerWindow.requestAnimationFrame(() => {
-                if (previousOpacity) {
-                    video.style.setProperty('opacity', previousOpacity, previousPriority);
-                } else {
-                    video.style.removeProperty('opacity');
-                }
-                try {
-                    ownerWindow.dispatchEvent(new Event('resize'));
-                } catch (error) {}
-                if (!video.paused) {
-                    video.play().catch(() => {});
-                }
-            });
-        };
-        const restoreDocumentPiPElements = () => {
-            pipMovedLayers.reverse().forEach(({element, placeholder, style, addedClasses}) => {
-                if (placeholder.parentNode) placeholder.replaceWith(element);
-                addedClasses.forEach((className) => element.classList.remove(className));
-                if (style === null) element.removeAttribute('style');
-                else element.setAttribute('style', style);
-            });
-            pipMovedLayers = [];
-            if (pipMovedElement && pipPlaceholder?.parentNode) {
-                pipPlaceholder.replaceWith(pipMovedElement);
-                if (pipOriginalStyle === null) pipMovedElement.removeAttribute('style');
-                else pipMovedElement.setAttribute('style', pipOriginalStyle);
-            }
-            pipPlaceholder = null;
-            pipMovedElement = null;
-            pipOriginalStyle = null;
-        };
-        const closeManagedPiP = async () => {
-            broadcastFramePiP('exit');
-            clearTimeout(automaticPiPRestoreTimer);
-            automaticPiPRestoreTimer = 0;
-            automaticPiPActive = false;
-            const exitingVideo = pipVideo;
-            if (pipWindow && !pipWindow.closed) {
-                pipWindow.close();
-            }
-            const pipDocument = pipVideo?.ownerDocument || document;
-            if (pipDocument.pictureInPictureElement) {
-                try {
-                    await pipDocument.exitPictureInPicture();
-                } catch (error) {}
-            }
-            restoreDocumentPiPElements();
-            pipWindow = null;
-            pipVideo = null;
-            clearMediaSessionPiPActions();
-            updatePiPToggle(false);
-            refreshVideoSurface(exitingVideo);
-        };
-        const copyStylesToPiP = (sourceDocument, targetDocument) => {
-            sourceDocument.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
-                const clone = targetDocument.createElement('link');
-                clone.rel = 'stylesheet';
-                clone.href = link.href;
-                targetDocument.head.appendChild(clone);
-            });
-            sourceDocument.querySelectorAll('style').forEach((style) => {
-                targetDocument.head.appendChild(style.cloneNode(true));
-            });
-        };
-        const findSubtitleLayers = (video) => {
-            const selectors = [
-                '.iqp-subtitle',
-                '.iqp-subtitle-box',
-                '.iqp-subtitle-container',
-                '.iqp-player-subtitle',
-                '.txp_subtitle',
-                '.txp-subtitle',
-                '.youku-layer-subtitle',
-                '.kui-subtitle',
-                '.bili-subtitle-x-subtitle-panel',
-                '.ytp-caption-window-container',
-                '[class*="subtitle-container"]',
-                '[class*="subtitle-layer"]',
-                '[class*="caption-window"]'
-            ];
-            const ownerDocument = video.ownerDocument || document;
-            const player = video.closest(
-                '.iqp-player, .bpx-player-container, .bilibili-player, [class*="player-container"], [class*="video-player"], [id*="player"]'
-            );
-            const videoRect = video.getBoundingClientRect();
-            const candidates = [...ownerDocument.querySelectorAll(selectors.join(','))]
-                .filter((layer) => (
-                    layer !== video
-                    && !layer.contains(video)
-                    && (() => {
-                        const rect = layer.getBoundingClientRect();
-                        const overlapsVideo = (
-                            rect.width > 0
-                            && rect.right > videoRect.left
-                            && rect.left < videoRect.right
-                            && rect.bottom > videoRect.top - 60
-                            && rect.top < videoRect.bottom + 160
-                        );
-                        return Boolean(player?.contains(layer) || overlapsVideo);
-                    })()
-                ));
-            return candidates
-                .filter((layer) => !candidates.some((other) => (
-                    other !== layer && other.contains(layer)
-                )))
-                .slice(0, 3)
-                .map((element) => {
-                    const rect = element.getBoundingClientRect();
-                    return {
-                        element,
-                        fullLayer: (
-                            rect.width >= videoRect.width * .7
-                            && rect.height >= videoRect.height * .35
-                        )
-                    };
-                });
-        };
-        const buildDocumentPiP = async (video) => {
-            const pipApi = window.documentPictureInPicture || unsafeWindow?.documentPictureInPicture;
-            if (!pipApi?.requestWindow || !video?.ownerDocument) return false;
-            const subtitleLayers = findSubtitleLayers(video);
-            const requestedWindow = await pipApi.requestWindow({
-                width: runtimeSettings.pipWidth,
-                height: runtimeSettings.pipHeight
-            });
-            pipWindow = requestedWindow;
-            pipVideo = video;
-            copyStylesToPiP(document, requestedWindow.document);
-            if (video.ownerDocument !== document) {
-                copyStylesToPiP(video.ownerDocument, requestedWindow.document);
-            }
-            requestedWindow.document.title = location.hostname;
-            requestedWindow.document.body.className = document.body.className;
-            const style = requestedWindow.document.createElement('style');
-            style.textContent = `
-                :root { color-scheme: dark; }
-                * { box-sizing: border-box; }
-                html, body {
-                    position: static !important;
-                    width: 100% !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: 100% !important;
-                    min-height: 0 !important;
-                    max-height: none !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    overflow: hidden !important;
-                    transform: none !important;
-                    background: #05050c !important;
-                }
-                #tc-pip-root {
-                    position: fixed !important;
-                    z-index: 2147483647 !important;
-                    inset: 0 !important;
-                    width: auto !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: auto !important;
-                    min-height: 0 !important;
-                    max-height: none !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    display: grid !important;
-                    grid-template: minmax(0,1fr) / minmax(0,1fr) !important;
-                    overflow: hidden !important;
-                    transform: none !important;
-                    color: #fff !important;
-                    background: #05050c !important;
-                    font: 13px/1.4 "Segoe UI","Microsoft YaHei",sans-serif !important;
-                }
-                #tc-pip-root .tc-pip-head {
-                    position: absolute !important;
-                    z-index: 10 !important;
-                    inset: 0 0 auto 0 !important;
-                    width: 100% !important;
-                    min-width: 0 !important;
-                    height: 36px !important;
-                    margin: 0 !important;
-                    padding: 0 10px !important;
-                    display: flex !important;
-                    align-items: center !important;
-                    justify-content: space-between !important;
-                    gap: 8px !important;
-                    transform: none !important;
-                    background: linear-gradient(to bottom, rgba(5,5,16,.78), transparent) !important;
-                }
-                #tc-pip-root .tc-pip-site {
-                    min-width: 0 !important;
-                    overflow: hidden !important;
-                    white-space: nowrap !important;
-                    text-overflow: ellipsis !important;
-                    font-weight: 700 !important;
-                }
-                #tc-pip-root .tc-pip-stage {
-                    position: absolute !important;
-                    inset: 0 !important;
-                    width: 100% !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: 100% !important;
-                    min-height: 0 !important;
-                    max-height: none !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    overflow: hidden !important;
-                    transform: none !important;
-                    background: #000 !important;
-                }
-                #tc-pip-root .tc-pip-stage > video {
-                    position: absolute !important;
-                    inset: 0 !important;
-                    width: 100% !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: 100% !important;
-                    min-height: 0 !important;
-                    max-height: none !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    display: block !important;
-                    float: none !important;
-                    object-fit: cover !important;
-                    object-position: center center !important;
-                    transform: none !important;
-                    clip-path: none !important;
-                }
-                #tc-pip-root .tc-pip-stage > .tc-pip-subtitle-layer {
-                    position: absolute !important;
-                    inset: 0 !important;
-                    width: 100% !important;
-                    min-width: 0 !important;
-                    height: 100% !important;
-                    min-height: 0 !important;
-                    margin: 0 !important;
-                    transform: none !important;
-                    z-index: 4 !important;
-                    pointer-events: none !important;
-                }
-                #tc-pip-root .tc-pip-stage > .tc-pip-subtitle-text {
-                    position: absolute !important;
-                    inset: auto 5% 8% 5% !important;
-                    width: 90% !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: auto !important;
-                    min-height: 0 !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    z-index: 7 !important;
-                    transform: none !important;
-                    color: #fff !important;
-                    text-align: center !important;
-                    text-shadow: 0 1px 3px #000, 0 0 5px #000 !important;
-                    pointer-events: none !important;
-                }
-                #tc-pip-root .tc-pip-controls {
-                    position: absolute !important;
-                    z-index: 10 !important;
-                    inset: 50% auto auto 50% !important;
-                    width: auto !important;
-                    min-width: 0 !important;
-                    max-width: none !important;
-                    height: auto !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    display: flex !important;
-                    align-items: center !important;
-                    justify-content: center !important;
-                    gap: 14px !important;
-                    float: none !important;
-                    overflow: visible !important;
-                    transform: translate(-50%, -50%) !important;
-                    background: transparent !important;
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                    transition: opacity .18s ease !important;
-                }
-                #tc-pip-root button {
-                    position: static !important;
-                    inset: auto !important;
-                    flex: 0 0 auto !important;
-                    min-width: 42px !important;
-                    max-width: none !important;
-                    height: 42px !important;
-                    margin: 0 !important;
-                    padding: 0 10px !important;
-                    display: inline-block !important;
-                    float: none !important;
-                    border: 0 !important;
-                    border-radius: 50% !important;
-                    opacity: 1 !important;
-                    visibility: visible !important;
-                    transform: none !important;
-                    color: #fff !important;
-                    background: rgba(20,20,30,.62) !important;
-                    box-shadow: 0 5px 18px rgba(0,0,0,.28) !important;
-                    cursor: pointer !important;
-                    font: inherit !important;
-                    line-height: 42px !important;
-                    text-indent: 0 !important;
-                }
-                #tc-pip-root button:hover { background:rgba(108,99,255,.82) !important; }
-                #tc-pip-root .tc-pip-play {
-                    min-width: 58px !important;
-                    height: 58px !important;
-                    padding: 0 !important;
-                    font-size: 22px !important;
-                    line-height: 58px !important;
-                    background: rgba(108,99,255,.84) !important;
-                }
-                #tc-pip-root .tc-pip-exit {
-                    width: auto !important;
-                    padding: 0 12px !important;
-                    border-radius: 12px !important;
-                    font-size: 11px !important;
-                }
-                #tc-pip-root .tc-pip-head button {
-                    min-width: 0 !important;
-                    width: auto !important;
-                    height: 28px !important;
-                    padding: 0 9px !important;
-                    border-radius: 9px !important;
-                    line-height: 28px !important;
-                    font-size: 11px !important;
-                }
-                #tc-pip-root .tc-pip-bottom {
-                    position: absolute !important;
-                    z-index: 10 !important;
-                    inset: auto 0 0 0 !important;
-                    width: 100% !important;
-                    height: 46px !important;
-                    padding: 6px 12px 7px !important;
-                    display: grid !important;
-                    grid-template-columns: minmax(0,1fr) auto !important;
-                    grid-template-rows: 12px 18px !important;
-                    align-items: center !important;
-                    column-gap: 10px !important;
-                    background: linear-gradient(to top, rgba(5,5,16,.84), transparent) !important;
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                    transition: opacity .18s ease !important;
-                }
-                #tc-pip-root:hover .tc-pip-controls,
-                #tc-pip-root:hover .tc-pip-bottom {
-                    opacity: 1 !important;
-                    pointer-events: auto !important;
-                }
-                #tc-pip-root .tc-pip-progress {
-                    grid-column: 1 / -1 !important;
-                    width: 100% !important;
-                    height: 4px !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    accent-color: #8f86ff !important;
-                    cursor: pointer !important;
-                }
-                #tc-pip-root .tc-pip-time {
-                    position: static !important;
-                    grid-column: 1 !important;
-                    min-width: 76px !important;
-                    margin: 0 !important;
-                    color: #cbc9dc !important;
-                    text-align: left !important;
-                    font-variant-numeric: tabular-nums !important;
-                    transform: none !important;
-                }
-                @media (max-width: 390px) {
-                    #tc-pip-root .tc-pip-time { min-width: 54px !important; font-size: 11px !important; }
-                }
-            `;
-            requestedWindow.document.head.appendChild(style);
-            const pipRoot = requestedWindow.document.createElement('div');
-            pipRoot.id = 'tc-pip-root';
-            const stage = requestedWindow.document.createElement('main');
-            stage.className = 'tc-pip-stage';
-            const controls = requestedWindow.document.createElement('footer');
-            controls.className = 'tc-pip-controls';
-            const backward = requestedWindow.document.createElement('button');
-            const play = requestedWindow.document.createElement('button');
-            const forward = requestedWindow.document.createElement('button');
-            const time = requestedWindow.document.createElement('span');
-            backward.type = play.type = forward.type = 'button';
-            backward.textContent = `−${runtimeSettings.pipSeekSeconds}s`;
-            play.textContent = video.paused ? '▶' : '⏸';
-            play.className = 'tc-pip-play';
-            forward.textContent = `+${runtimeSettings.pipSeekSeconds}s`;
-            time.className = 'tc-pip-time';
-            const bottom = requestedWindow.document.createElement('div');
-            bottom.className = 'tc-pip-bottom';
-            const progress = requestedWindow.document.createElement('input');
-            progress.className = 'tc-pip-progress';
-            progress.type = 'range';
-            progress.min = '0';
-            progress.max = String(Number.isFinite(video.duration) ? video.duration : 0);
-            progress.step = '0.1';
-            progress.value = String(video.currentTime || 0);
-            controls.append(backward, play, forward);
-            bottom.append(progress, time);
-            pipRoot.append(stage, controls, bottom);
-            requestedWindow.document.body.appendChild(pipRoot);
-
-            pipPlaceholder = document.createComment('tc-pip-video-placeholder');
-            pipMovedElement = video;
-            pipOriginalStyle = video.getAttribute('style');
-            video.replaceWith(pipPlaceholder);
-            stage.appendChild(video);
-            [
-                ['position', 'absolute'],
-                ['inset', '0'],
-                ['width', '100%'],
-                ['min-width', '0'],
-                ['max-width', 'none'],
-                ['height', '100%'],
-                ['min-height', '0'],
-                ['max-height', 'none'],
-                ['margin', '0'],
-                ['padding', '0'],
-                ['display', 'block'],
-                ['float', 'none'],
-                ['object-fit', 'cover'],
-                ['object-position', 'center center'],
-                ['transform', 'none'],
-                ['clip-path', 'none']
-            ].forEach(([property, value]) => {
-                video.style.setProperty(property, value, 'important');
-            });
-            subtitleLayers.forEach(({element: layer, fullLayer}) => {
-                const placeholder = document.createComment('tc-pip-subtitle-placeholder');
-                const originalStyle = layer.getAttribute('style');
-                const addedClasses = [];
-                layer.replaceWith(placeholder);
-                const positionClass = fullLayer
-                    ? 'tc-pip-subtitle-layer'
-                    : 'tc-pip-subtitle-text';
-                if (!layer.classList.contains(positionClass)) {
-                    layer.classList.add(positionClass);
-                    addedClasses.push(positionClass);
-                }
-                stage.appendChild(layer);
-                pipMovedLayers.push({
-                    element: layer,
-                    placeholder,
-                    style: originalStyle,
-                    addedClasses
-                });
-            });
-            const formatTime = (value) => {
-                if (!Number.isFinite(value)) return '--:--';
-                const minutes = Math.floor(value / 60);
-                return `${minutes}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
-            };
-            const syncControls = () => {
-                play.textContent = video.paused ? '▶' : '⏸';
-                time.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
-                progress.max = String(Number.isFinite(video.duration) ? video.duration : 0);
-                if (requestedWindow.document.activeElement !== progress) {
-                    progress.value = String(video.currentTime || 0);
-                }
-                backward.textContent = `−${runtimeSettings.pipSeekSeconds}s`;
-                forward.textContent = `+${runtimeSettings.pipSeekSeconds}s`;
-            };
-            backward.addEventListener('click', () => seekPiPVideo(-runtimeSettings.pipSeekSeconds));
-            forward.addEventListener('click', () => seekPiPVideo(runtimeSettings.pipSeekSeconds));
-            play.addEventListener('click', () => video.paused ? video.play() : video.pause());
-            progress.addEventListener('input', () => {
-                time.textContent = `${formatTime(Number(progress.value))} / ${formatTime(video.duration)}`;
-            });
-            progress.addEventListener('change', () => {
-                video.currentTime = Number(progress.value);
-            });
-            ['play', 'pause', 'timeupdate', 'durationchange'].forEach((name) => {
-                video.addEventListener(name, syncControls);
-            });
-            syncControls();
-            requestedWindow.addEventListener('resize', () => {
-                clearTimeout(pipResizeTimer);
-                pipResizeTimer = window.setTimeout(() => {
-                    if (!pipWindow || pipWindow.closed) return;
-                    const width = Math.round(pipWindow.innerWidth || pipWindow.width);
-                    const height = Math.round(pipWindow.innerHeight || pipWindow.height);
-                    if (width < MIN_PIP_WIDTH || height < MIN_PIP_HEIGHT) return;
-                    const widthInput = root.querySelector('[data-setting="pip-width"]');
-                    const heightInput = root.querySelector('[data-setting="pip-height"]');
-                    if (widthInput) widthInput.value = String(width);
-                    if (heightInput) heightInput.value = String(height);
-                }, 120);
-            });
-            requestedWindow.addEventListener('pagehide', () => {
-                restoreDocumentPiPElements();
-                pipWindow = null;
-                pipVideo = null;
-                clearMediaSessionPiPActions();
-                updatePiPToggle(false);
-            }, {once: true});
-            return true;
-        };
-        const buildTencentFrameDocumentPiP = async () => {
-            const pipApi = window.documentPictureInPicture || unsafeWindow?.documentPictureInPicture;
-            if (!pipApi?.requestWindow) return false;
-            const iframeCandidates = new Set();
-            const collectIframes = (tree) => {
-                if (!tree?.querySelectorAll) return;
-                tree.querySelectorAll('iframe').forEach((frame) => iframeCandidates.add(frame));
-                tree.querySelectorAll('*').forEach((element) => {
-                    if (element.shadowRoot) collectIframes(element.shadowRoot);
-                });
-            };
-            collectIframes(document);
-            const playerCandidates = new Set([
-                ...document.querySelectorAll([
-                    '#mod_player',
-                    '#player-container',
-                    '.container-player',
-                    '.txp_player',
-                    '.txp-player',
-                    '[class*="txp-player"]',
-                    '[data-role="player"]'
-                ].join(',')),
-                ...iframeCandidates
-            ]);
-            const surfaces = [...playerCandidates]
-                .map((element) => {
-                    const rect = element.getBoundingClientRect();
-                    const source = element instanceof HTMLIFrameElement ? (element.src || '') : '';
-                    const playerScore = element instanceof HTMLIFrameElement ? 0 : 2e12;
-                    const tencentScore = /(?:qq|gtimg)\.com/i.test(source) ? 1e12 : 0;
-                    return {
-                        element,
-                        rect,
-                        score: playerScore + tencentScore + rect.width * rect.height
-                    };
-                })
-                .filter(({rect}) => rect.width >= 240 && rect.height >= 135)
-                .sort((left, right) => right.score - left.score);
-            const selected = surfaces[0];
-            if (!selected) return false;
-
-            const width = Math.round(Math.min(960, Math.max(360, selected.rect.width)));
-            const ratio = selected.rect.width / Math.max(1, selected.rect.height);
-            const height = Math.round(Math.min(720, Math.max(203, width / ratio)));
-            const requestedWindow = await pipApi.requestWindow({width, height});
-            pipWindow = requestedWindow;
-            requestedWindow.document.title = 'v.qq.com';
-
-            const style = requestedWindow.document.createElement('style');
-            style.textContent = `
-                html, body {
-                    width: 100% !important;
-                    height: 100% !important;
-                    min-width: 0 !important;
-                    min-height: 0 !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    overflow: hidden !important;
-                    background: #000 !important;
-                }
-                #tc-tencent-pip-stage {
-                    position: fixed !important;
-                    inset: 0 !important;
-                    overflow: hidden !important;
-                    background: #000 !important;
-                }
-                #tc-tencent-pip-stage > * {
-                    position: absolute !important;
-                    inset: 0 !important;
-                    width: 100% !important;
-                    height: 100% !important;
-                    min-width: 0 !important;
-                    min-height: 0 !important;
-                    max-width: none !important;
-                    max-height: none !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    border: 0 !important;
-                    transform: none !important;
-                }
-            `;
-            requestedWindow.document.head.appendChild(style);
-            const stage = requestedWindow.document.createElement('main');
-            stage.id = 'tc-tencent-pip-stage';
-            requestedWindow.document.body.appendChild(stage);
-
-            pipPlaceholder = document.createComment('tc-tencent-player-placeholder');
-            pipMovedElement = selected.element;
-            pipOriginalStyle = selected.element.getAttribute('style');
-            selected.element.replaceWith(pipPlaceholder);
-            stage.appendChild(selected.element);
-
-            requestedWindow.addEventListener('pagehide', () => {
-                restoreDocumentPiPElements();
-                pipWindow = null;
-                updatePiPToggle(false);
-            }, {once: true});
-            updatePiPToggle(true);
-            return true;
-        };
-        const enterPiP = async (automatic = false) => {
-            if (pipWindow || pipVideo?.ownerDocument?.pictureInPictureElement) {
-                if (!automatic) await closeManagedPiP();
-                return true;
-            }
-            const video = getBestPiPVideo();
-            if (!video) {
-                broadcastFramePiP(automatic ? 'enter' : 'toggle');
-                updatePiPToggle(true, '已向跨域播放器请求画中画');
-                if (!automatic) {
-                    setStatus(
-                        root,
-                        isTencentVideoHost()
-                            ? '未识别到腾讯播放器区域，请刷新页面后重试'
-                            : '正在请求跨域播放器开启画中画'
-                    );
-                }
-                return true;
-            }
-            pipVideo = video;
-            try {
-                video.disablePictureInPicture = false;
-                video.removeAttribute('disablepictureinpicture');
-                if (automatic) {
-                    try {
-                        video.autoPictureInPicture = true;
-                        video.setAttribute('autopictureinpicture', '');
-                    } catch (error) {}
-                }
-                if (!video.requestPictureInPicture) {
-                    throw new Error('当前浏览器不支持原生画中画');
-                }
-                await video.requestPictureInPicture();
-                automaticPiPActive = Boolean(automatic);
-                video.addEventListener('leavepictureinpicture', () => {
-                    clearMediaSessionPiPActions();
-                    automaticPiPActive = false;
-                    pipVideo = null;
-                    updatePiPToggle(false);
-                    refreshVideoSurface(video);
-                }, {once: true});
-                updatePiPToggle(true);
-                return true;
-            } catch (error) {
-                pipVideo = null;
-                updatePiPToggle(false);
-                if (!automatic) {
-                    setStatus(root, error?.message || '画中画开启失败，请先点击页面中的视频再重试');
-                    root.classList.add('tc-open');
-                }
-                return false;
-            }
-        };
-        const syncAutoPiPMediaSessionAction = () => {
-            if (!navigator.mediaSession) return;
-            try {
-                navigator.mediaSession.setActionHandler(
-                    'enterpictureinpicture',
-                    runtimeSettings.autoPiP ? () => enterPiP(true) : null
-                );
-            } catch (error) {
-                // 当前浏览器尚未开放自动画中画 Media Session 动作。
-            }
-        };
-        syncAutoPiPMediaSessionAction();
-        ['play', 'playing'].forEach((eventName) => {
-            document.addEventListener(eventName, () => {
-                window.setTimeout(syncAutoPiPMediaSessionAction, 0);
-            }, true);
-        });
         const setRateOnVideo = (video) => {
             if (!playbackControllerEnabled) return false;
             return forceVideoPlaybackRate(video, currentPlaybackRate);
@@ -3257,18 +2233,6 @@
             event.stopPropagation();
             suspendPageAssistant();
         });
-        pipToggle.addEventListener('click', () => enterPiP(false));
-        window.addEventListener('message', (event) => {
-            const message = event.data;
-            if (
-                event.source === window
-                || message?.source !== APP_ID
-                || message?.type !== FRAME_PIP_MESSAGE
-                || message?.action !== 'state'
-            ) return;
-            updatePiPToggle(Boolean(message.active));
-            if (message.error) setStatus(root, message.error);
-        });
         ['pointerdown', 'input', 'change', 'keydown', 'wheel'].forEach((eventName) => {
             panel.addEventListener(eventName, scheduleDim, eventName === 'wheel' ? {passive: true} : false);
             speedPopover.addEventListener(eventName, scheduleDim, eventName === 'wheel' ? {passive: true} : false);
@@ -3362,7 +2326,6 @@
             settingsView.hidden = !openingSettings;
             mainView.hidden = openingSettings;
             gearButton.classList.toggle('tc-active', openingSettings);
-            root.classList.toggle('tc-settings-open', openingSettings);
             backButton.hidden = !openingSettings;
             requestAnimationFrame(positionPanel);
         });
@@ -3371,7 +2334,6 @@
         });
         const fadeSecondsInput = root.querySelector('[data-setting="fade-seconds"]');
         const edgeSnapInput = root.querySelector('[data-setting="edge-snap"]');
-        const autoPiPInput = root.querySelector('[data-setting="auto-pip"]');
         fadeSecondsInput?.addEventListener('change', () => {
             const seconds = Math.min(10, Math.max(0, Number(fadeSecondsInput.value) || 0));
             fadeSecondsInput.value = String(seconds);
@@ -3381,18 +2343,6 @@
         edgeSnapInput?.addEventListener('change', () => {
             saveSettingPatch({edgeSnap: edgeSnapInput.checked});
         });
-        autoPiPInput?.addEventListener('change', () => {
-            saveSettingPatch({autoPiP: autoPiPInput.checked});
-            syncAutoPiPMediaSessionAction();
-        });
-        if (typeof GM_addValueChangeListener === 'function') {
-            GM_addValueChangeListener(SETTINGS_KEY, () => {
-                const synced = getSettings();
-                runtimeSettings = {...runtimeSettings, ...synced};
-                if (autoPiPInput) autoPiPInput.checked = synced.autoPiP;
-                syncAutoPiPMediaSessionAction();
-            });
-        }
         const numberInput = root.querySelector('#tc-index-number');
         root.querySelectorAll('[data-index-step]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -3417,7 +2367,6 @@
             if (settingsView) settingsView.hidden = true;
             mainView.hidden = false;
             gearButton?.classList.remove('tc-active');
-            root.classList.remove('tc-settings-open');
             if (backButton) backButton.hidden = true;
             const searchInput = root.querySelector('#tc-query');
             searchInput?.focus();
@@ -3473,64 +2422,10 @@
             window.setInterval(() => {
                 if (!document.hidden) syncVideoPlaybackRates();
             }, getPlaybackGuardInterval());
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) syncVideoPlaybackRates();
+            });
         }
-        let autoPiPTimer = 0;
-        let returnFocusTimer = 0;
-        const requestAutomaticPiP = () => {
-            if (!runtimeSettings.autoPiP) return;
-            const video = getBestPiPVideo();
-            if (video && !video.paused) {
-                enterPiP(true);
-            } else {
-                broadcastFramePiP('enter');
-            }
-        };
-        const returnToPlaybackPage = () => {
-            clearTimeout(autoPiPTimer);
-            clearTimeout(returnFocusTimer);
-            autoPiPTimer = 0;
-            returnFocusTimer = 0;
-            if (isPlaybackControlSupportedHere()) syncVideoPlaybackRates();
-            if (
-                automaticPiPActive
-                && pipVideo?.ownerDocument?.pictureInPictureElement === pipVideo
-            ) {
-                clearTimeout(automaticPiPRestoreTimer);
-                automaticPiPRestoreTimer = window.setTimeout(() => {
-                    automaticPiPRestoreTimer = 0;
-                    if (pipVideo?.ownerDocument?.pictureInPictureElement === pipVideo) {
-                        closeManagedPiP();
-                    }
-                }, 550);
-                return;
-            }
-            closeManagedPiP();
-        };
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) returnToPlaybackPage();
-            else {
-                clearTimeout(returnFocusTimer);
-                returnFocusTimer = 0;
-                requestAutomaticPiP();
-            }
-        });
-        window.addEventListener('blur', () => {
-            if (!runtimeSettings.autoPiP) return;
-            clearTimeout(returnFocusTimer);
-            returnFocusTimer = 0;
-            clearTimeout(autoPiPTimer);
-            autoPiPTimer = window.setTimeout(() => {
-                autoPiPTimer = 0;
-                if (!document.hasFocus()) requestAutomaticPiP();
-            }, 280);
-        });
-        window.addEventListener('focus', () => {
-            clearTimeout(returnFocusTimer);
-            returnFocusTimer = window.setTimeout(() => {
-                returnFocusTimer = 0;
-                if (!document.hidden && document.hasFocus()) returnToPlaybackPage();
-            }, 220);
-        });
         return root;
     }
 
