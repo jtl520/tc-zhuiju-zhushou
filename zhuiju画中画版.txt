@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         天虫
 // @namespace    https://github.com/local/tianchong-video-navigator
-// @version      2.0.5
+// @version      2.0.0
 // @description  从主流视频页面提取片名与集数，辅助在目标站搜索，并提供通用视频倍速与画中画控制。
 // @author       jtl66
 // @match        *://*/*
@@ -13,6 +13,7 @@
 // @match        https://youtu.be/*
 // @match        https://www.youtube-nocookie.com/*
 // @grant        GM_addStyle
+// @grant        GM_addElement
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
@@ -39,28 +40,24 @@
     });
     const FRAME_SLEEP_MESSAGE = 'tc-sleep-timer';
     const SLEEP_DEADLINE_KEY = 'tc_sleep_timer_deadline';
-    const SLEEP_COUNTDOWN_STATUS = '倒计时进行中，结束后将暂停播放';
-    const SLEEP_FINISHED_STATUS = '定时结束，已暂停当前页面播放';
-    const SLEEP_FINISHED_STATUS_MS = 5000;
     const MAX_TITLE_LENGTH = 100;
-    const SCRIPT_VERSION = '2.0.5';
+    const SCRIPT_VERSION = '2.0.0';
     const DEFAULT_FADE_SECONDS = 10;
     const SPEED_AUTO_CLOSE_MS = 1500;
     const MAX_PANEL_OPEN_MS = 10000;
     const MAX_INPUT_OPEN_MS = 30000;
     const PLAYBACK_FALLBACK_SCAN_MS = 8000;
     const MEDIA_INFO_REFRESH_MS = 2500;
+    const TENCENT_SPEED_CONTROL_ENABLED = false;
     const ROUTE_PLAYER_ID = 'tc-authorized-route-player';
     const FRAME_CONTROL_MESSAGE = 'tc-playback-controller';
     const FRAME_PIP_MESSAGE = 'tc-pip-controller';
     const PLAYBACK_RATE_PRESETS = [0.5, 1, 1.5, 2, 2.5, 3];
     const MIN_PLAYBACK_RATE = 0.1;
     const MAX_PLAYBACK_RATE = 16;
-    const DEFAULT_PIP_SEEK_SECONDS = 10;
+    const TENCENT_PIP_SEEK_SECONDS = 10;
     const MIN_PIP_WIDTH = 240;
     const MIN_PIP_HEIGHT = 135;
-    // 顶层页面才需要完整界面和平台识别配置；iframe 只运行媒体控制器。
-    const IS_TOP_LEVEL = window.top === window.self;
 
     /**
      * 将任意输入限制为 1 秒至 24 小时的整数秒。
@@ -135,25 +132,8 @@
             if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(seconds) || seconds < 1) {
                 return;
             }
-            const rect = media.getBoundingClientRect?.()
-                || {top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0};
-            const ownerWindow = media.ownerDocument?.defaultView || window;
-            const visibleWidth = Math.max(
-                0,
-                Math.min(rect.right, ownerWindow.innerWidth) - Math.max(rect.left, 0)
-            );
-            const visibleHeight = Math.max(
-                0,
-                Math.min(rect.bottom, ownerWindow.innerHeight) - Math.max(rect.top, 0)
-            );
-            const visibleArea = visibleWidth * visibleHeight;
-            const centerDistance = Math.abs(
-                rect.top + rect.height / 2 - ownerWindow.innerHeight / 2
-            );
-            const score = (media.paused ? 0 : 1e12)
-                + visibleArea * 1000
-                + rect.width * rect.height
-                - centerDistance;
+            const rect = media.getBoundingClientRect?.() || {width: 0, height: 0};
+            const score = (media.paused ? 0 : 1e12) + rect.width * rect.height;
             if (!best || score > best.score) best = {seconds, score};
         });
         root.querySelectorAll('*').forEach((element) => {
@@ -239,7 +219,7 @@
     ];
     // ================== 自有/授权接口配置区结束 ==================
 
-    const PLAYER_TARGETS = IS_TOP_LEVEL ? [
+    const PLAYER_TARGETS = [
         {
             host: /(^|\.)v\.qq\.com$/,
             container: '#mod_player, #player-container, .container-player',
@@ -265,9 +245,9 @@
             container: '#player_module, #bilibiliPlayer, #bilibili-player, .player-wrapper, .player-container, .mplayer',
             cleanup: ''
         }
-    ] : [];
+    ];
 
-    const PLATFORM_RULES = IS_TOP_LEVEL ? [
+    const PLATFORM_RULES = [
         {
             host: /(^|\.)v\.qq\.com$/,
             name: '腾讯视频',
@@ -344,9 +324,9 @@
                 '[aria-current="true"]'
             ]
         }
-    ] : [];
+    ];
 
-    if (IS_TOP_LEVEL) GM_addStyle(`
+    GM_addStyle(`
         #${APP_ID}, #${APP_ID} * { box-sizing: border-box; }
         #${APP_ID} {
             --tc-bg: rgba(24, 24, 54, .94);
@@ -482,7 +462,7 @@
         }
         #${APP_ID}.tc-open .tc-panel { display: block; }
         #${APP_ID}.tc-settings-open .tc-panel {
-            width: min(300px, calc(100vw - 16px));
+            width: min(340px, calc(100vw - 16px));
         }
         #${APP_ID}.tc-speed-modal .tc-panel {
             filter: blur(5px) saturate(.72);
@@ -745,28 +725,16 @@
             font-size: 12px;
         }
         #${APP_ID} .tc-run { width: 100%; margin-top: 7px; }
-        #${APP_ID} .tc-settings-view {
-            min-height: 0;
-            padding-inline: 11px;
-        }
+        #${APP_ID} .tc-settings-view { min-height: 0; }
         #${APP_ID} .tc-settings-title {
-            margin: 0 0 7px;
+            margin-bottom: 6px;
             color: #e2e8f0;
             font-size: 14px;
             font-weight: 700;
         }
         #${APP_ID} .tc-settings-body {
             display: grid;
-            width: 100%;
-            margin: 0;
-            padding: 0;
-            gap: 7px;
-        }
-        #${APP_ID} .tc-settings-body > .tc-setting-label,
-        #${APP_ID} .tc-settings-body > .tc-setting-check,
-        #${APP_ID} .tc-settings-body > .tc-route-settings {
-            width: 100%;
-            margin-inline: 0;
+            gap: 6px;
         }
         #${APP_ID} .tc-route-settings {
             display: grid;
@@ -1022,13 +990,9 @@
         const queue = [{value: root, depth: 0}];
         const visited = new WeakSet();
         let checked = 0;
-        let queueIndex = 0;
 
-        // 使用游标消费队列，避免 Array.shift() 在大对象树中反复搬移剩余元素。
-        while (queueIndex < queue.length && checked < 12000) {
-            const {value, depth} = queue[queueIndex];
-            queue[queueIndex] = null;
-            queueIndex += 1;
+        while (queue.length && checked < 12000) {
+            const {value, depth} = queue.shift();
             if (!value || typeof value !== 'object' || visited.has(value)) continue;
             visited.add(value);
             checked += 1;
@@ -1206,85 +1170,6 @@
         return reliable || normalized[0] || '';
     }
 
-    /**
-     * 拆分作品主体与季名，仅用于比较“第四季”和“完结季”等同作品别名。
-     */
-    function splitSeasonQualifiedTitle(value) {
-        const title = cleanText(
-            normalizeDocumentTitle(value)
-            .replace(/\s*(?:简介|详情)\s*[>›»〉]*$/, '')
-        );
-        const match = title.match(
-            /^(.*?)[\s·•：:_—-]*((?:第\s*(?:\d{1,2}|[零〇一二三四五六七八九十百两]{1,5})\s*季)|(?:(?:完结|最终|终结)季))$/
-        );
-        if (!match) return {title, baseKey: '', seasonLabel: ''};
-        const baseTitle = stripTitleDecorations(cleanText(match[1]));
-        return {
-            title,
-            baseKey: baseTitle.replace(/[\s·•：:_—《》〈〉「」『』【】〔〕“”"'‘’()-]+/g, '').toLowerCase(),
-            seasonLabel: cleanText(match[2]).replace(/\s+/g, '')
-        };
-    }
-
-    /**
-     * 腾讯内部数据可能使用数字季名；只查找同一作品且明确标注完结含义的可见标题。
-     */
-    function findVisibleTencentFinalSeasonTitle(expectedBaseKey) {
-        if (!expectedBaseKey) return '';
-        const nodes = document.querySelectorAll([
-            '[data-testid="video-title"]',
-            '.video_title_cn',
-            '.video_title',
-            '.mod_intro .video_title',
-            '.player-title',
-            'h1',
-            'h2',
-            'h3',
-            '[class*="video-title" i]',
-            '[class*="intro-title" i]',
-            '[class*="intro_title" i]'
-        ].join(','));
-        for (const node of nodes) {
-            if (node.closest?.(`#${APP_ID}`) || node.offsetParent === null) continue;
-            const candidate = cleanText(node.getAttribute?.('data-title') || node.textContent);
-            const parts = splitSeasonQualifiedTitle(candidate);
-            if (
-                parts.baseKey === expectedBaseKey
-                && /^(?:完结|最终|终结)季$/.test(parts.seasonLabel)
-            ) {
-                return parts.title;
-            }
-        }
-        return '';
-    }
-
-    /**
-     * 仅在同一腾讯作品存在明确页面季名时校正内部数字季名，避免误改真实“第四季”。
-     */
-    function reconcileTencentSeasonTitle(platform, preferredTitle, displayCandidates) {
-        if (platform?.name !== '腾讯视频' || !preferredTitle) return preferredTitle;
-        const preferredParts = splitSeasonQualifiedTitle(preferredTitle);
-        if (
-            !preferredParts.baseKey
-            || !/^第(?:\d{1,2}|[零〇一二三四五六七八九十百两]{1,5})季$/.test(
-                preferredParts.seasonLabel
-            )
-        ) {
-            return preferredTitle;
-        }
-
-        for (const candidate of displayCandidates) {
-            const candidateParts = splitSeasonQualifiedTitle(candidate);
-            if (
-                candidateParts.baseKey === preferredParts.baseKey
-                && /^(?:完结|最终|终结)季$/.test(candidateParts.seasonLabel)
-            ) {
-                return candidateParts.title;
-            }
-        }
-        return findVisibleTencentFinalSeasonTitle(preferredParts.baseKey) || preferredTitle;
-    }
-
     function extractPlatformDocumentTitle(platform) {
         const tabTitle = cleanText(document.title);
         if (!tabTitle || isGenericMediaTitle(tabTitle)) return '';
@@ -1431,26 +1316,19 @@
         const structuredTitle = getStructuredPlatformTitle(platform);
         const domTitle = firstText(platform?.titleSelectors);
         const platformDocumentTitle = extractPlatformDocumentTitle(platform);
+        const visibleTitle = findVisibleTitleCandidate();
         const ogTitle = metaContent(
             'meta[property="og:title"]',
             'meta[name="title"]',
             'meta[itemprop="name"]'
         );
         const episodeText = firstText(platform?.episodeSelectors) || findSelectedEpisodeText();
-        const initialPreferredTitle = chooseBestMediaTitle([
+        const rawTitle = chooseBestMediaTitle([
             structuredTitle,
             platformDocumentTitle,
             domTitle,
-            ogTitle
-        ]);
-        const preferredTitle = reconcileTencentSeasonTitle(
-            platform,
-            initialPreferredTitle,
-            [domTitle, ogTitle, platformDocumentTitle]
-        );
-        // 宽泛的可见标题扫描会读取大量布局信息，仅在可靠来源全部失败时兜底。
-        const rawTitle = preferredTitle || chooseBestMediaTitle([
-            findVisibleTitleCandidate(),
+            ogTitle,
+            visibleTitle,
             document.title
         ]);
         const normalizedTitle = normalizeDocumentTitle(rawTitle);
@@ -1527,9 +1405,16 @@
             sleepDurationUnit: ['seconds', 'minutes', 'hours'].includes(stored?.sleepDurationUnit)
                 ? stored.sleepDurationUnit
                 : 'minutes',
-            // 每次打开页面默认重新进入智能模式，旧时长只在尚未识别视频时兜底。
-            sleepDurationCustomized: false,
-            pipSeekSeconds: DEFAULT_PIP_SEEK_SECONDS,
+            sleepDurationCustomized: stored?.sleepDurationCustomized === true
+                || (
+                    stored?.sleepDurationCustomized == null
+                    && (
+                        Number.isFinite(Number(stored?.sleepDurationSeconds))
+                        || Number.isFinite(Number(stored?.sleepMinutes))
+                    )
+                ),
+            autoPiP: stored?.autoPiP !== false,
+            pipSeekSeconds: TENCENT_PIP_SEEK_SECONDS,
             pipWidth: 640,
             pipHeight: 360,
             pipDanmaku: false,
@@ -1573,6 +1458,7 @@
         if (!video || !Number.isFinite(Number(rate))) return false;
         const normalizedRate = Number(rate);
         try {
+            video.defaultPlaybackRate = normalizedRate;
             const pageWindow = video.ownerDocument?.defaultView;
             const mediaPrototype = (
                 pageWindow?.HTMLMediaElement?.prototype
@@ -1582,16 +1468,6 @@
             const descriptor = mediaPrototype
                 ? Object.getOwnPropertyDescriptor(mediaPrototype, 'playbackRate')
                 : null;
-            const actualRate = descriptor?.get
-                ? Number(descriptor.get.call(video))
-                : Number(video.playbackRate);
-            if (
-                Math.abs(actualRate - normalizedRate) <= .001
-                && Math.abs(Number(video.defaultPlaybackRate) - normalizedRate) <= .001
-            ) {
-                return true;
-            }
-            video.defaultPlaybackRate = normalizedRate;
             if (descriptor?.set) {
                 descriptor.set.call(video, normalizedRate);
             } else {
@@ -1615,119 +1491,360 @@
         return PLAYBACK_FALLBACK_SCAN_MS;
     }
 
-    /**
-     * 判断当前顶层地址是否属于腾讯视频，供界面按钮显示原生播放器提示。
-     */
     function isTencentVideoHost() {
         return /(^|\.)v\.qq\.com$/i.test(location.hostname);
     }
 
-    /**
-     * 判断当前顶层地址是否属于抖音，供画中画选择可交互的文档窗口。
-     */
-    function isDouyinVideoHost() {
-        return /(^|\.)douyin\.com$/i.test(location.hostname);
-    }
-
-    /**
-     * 判断当前脚本上下文是否属于腾讯播放链路，包括播放器使用的子 frame。
-     */
-    function isTencentPlaybackContext() {
-        if (isTencentVideoHost()) return true;
-        const isTencentFrameHost = /(^|\.)(?:qq\.com|gtimg\.com)$/i.test(location.hostname);
-        return isTencentFrameHost
-            && /https?:\/\/(?:[^/]+\.)?v\.qq\.com\//i.test(document.referrer || '');
-    }
-
-    /**
-     * 腾讯播放链路明确交给播放器原生按钮，其他网站继续使用通用媒体控制。
-     */
     function isPlaybackControlSupportedHere() {
-        return !isTencentPlaybackContext();
+        return !isTencentVideoHost() || TENCENT_SPEED_CONTROL_ENABLED;
     }
 
-    /**
-     * 单次遍历普通 DOM 与开放 Shadow DOM，并可同时登记 iframe 和 Shadow Root。
-     */
-    function collectVideosInOpenTrees(
-        root,
-        videos = new Set(),
-        frames = null,
-        shadowRoots = null
-    ) {
-        if (!root?.querySelectorAll) return videos;
-        if (root.localName === 'video') videos.add(root);
-        if (frames && root.localName === 'iframe') frames.add(root);
-        const nestedShadowRoots = [];
-        // 一次遍历同时收集视频和开放的 Shadow Root，避免对同一 DOM 树查询两遍。
-        for (const element of root.querySelectorAll('*')) {
-            if (element.localName === 'video') videos.add(element);
-            if (frames && element.localName === 'iframe') frames.add(element);
-            if (element.shadowRoot) nestedShadowRoots.push(element.shadowRoot);
+    function installTencentMainWorldBridge() {
+        if (
+            !TENCENT_SPEED_CONTROL_ENABLED
+            || !isTencentVideoHost()
+            || typeof GM_addElement !== 'function'
+        ) return;
+        const bridgeSource = `(() => {
+            const bridgeKey = '__tcTencentMainWorldBridge_v198';
+            if (window[bridgeKey]) return;
+            const state = {
+                enabled: true,
+                rate: 1,
+                originalDescriptor: null,
+                originalPlay: null,
+                originalDefineProperty: Object.defineProperty,
+                originalDefineProperties: Object.defineProperties,
+                guardedSetter: null,
+                guardedPlay: null,
+                propertyGuardsInstalled: false
+            };
+            window[bridgeKey] = state;
+            const guardOwnRateDescriptor = (target, key, descriptor) => {
+                if (
+                    key !== 'playbackRate'
+                    || !descriptor
+                    || !window.HTMLMediaElement
+                    || !(target instanceof window.HTMLMediaElement)
+                ) return descriptor;
+                const originalGet = descriptor.get;
+                const originalSet = descriptor.set;
+                let storedValue = descriptor.value;
+                return {
+                    configurable: true,
+                    enumerable: Boolean(descriptor.enumerable),
+                    get() {
+                        if (state.enabled) return state.rate;
+                        if (typeof originalGet === 'function') {
+                            return Reflect.apply(originalGet, this, []);
+                        }
+                        if ('value' in descriptor) return storedValue;
+                        return state.originalDescriptor
+                            ? Reflect.apply(state.originalDescriptor.get, this, [])
+                            : 1;
+                    },
+                    set(requestedRate) {
+                        const effectiveRate = state.enabled ? state.rate : requestedRate;
+                        let result;
+                        if (typeof originalSet === 'function') {
+                            result = Reflect.apply(originalSet, this, [effectiveRate]);
+                        } else {
+                            storedValue = effectiveRate;
+                        }
+                        if (state.originalDescriptor) {
+                            try {
+                                Reflect.apply(state.originalDescriptor.set, this, [effectiveRate]);
+                            } catch (error) {}
+                        }
+                        return result;
+                    }
+                };
+            };
+            const installPropertyGuards = () => {
+                if (state.propertyGuardsInstalled) return;
+                const guardedDefineProperty = function (target, key, descriptor) {
+                    let nextDescriptor = descriptor;
+                    try {
+                        nextDescriptor = guardOwnRateDescriptor(target, key, descriptor);
+                    } catch (error) {}
+                    return Reflect.apply(
+                        state.originalDefineProperty,
+                        Object,
+                        [target, key, nextDescriptor]
+                    );
+                };
+                const guardedDefineProperties = function (target, descriptors) {
+                    let nextDescriptors = descriptors;
+                    try {
+                        if (
+                            descriptors
+                            && Object.prototype.hasOwnProperty.call(descriptors, 'playbackRate')
+                            && window.HTMLMediaElement
+                            && target instanceof window.HTMLMediaElement
+                        ) {
+                            nextDescriptors = {...descriptors};
+                            nextDescriptors.playbackRate = guardOwnRateDescriptor(
+                                target,
+                                'playbackRate',
+                                descriptors.playbackRate
+                            );
+                        }
+                    } catch (error) {}
+                    return Reflect.apply(
+                        state.originalDefineProperties,
+                        Object,
+                        [target, nextDescriptors]
+                    );
+                };
+                try {
+                    state.originalDefineProperty.call(Object, Object, 'defineProperty', {
+                        configurable: true,
+                        writable: true,
+                        value: guardedDefineProperty
+                    });
+                    state.originalDefineProperty.call(Object, Object, 'defineProperties', {
+                        configurable: true,
+                        writable: true,
+                        value: guardedDefineProperties
+                    });
+                    state.propertyGuardsInstalled = true;
+                } catch (error) {}
+            };
+            const hook = () => {
+                const proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
+                if (!proto) return;
+                if (!state.originalDescriptor) {
+                    const descriptor = Object.getOwnPropertyDescriptor(proto, 'playbackRate');
+                    if (!descriptor || !descriptor.get || !descriptor.set || !descriptor.configurable) return;
+                    state.originalDescriptor = descriptor;
+                    state.originalPlay = proto.play;
+                    state.guardedSetter = function (requestedRate) {
+                        return Reflect.apply(
+                            state.originalDescriptor.set,
+                            this,
+                            [state.enabled ? state.rate : requestedRate]
+                        );
+                    };
+                    state.guardedPlay = function (...args) {
+                        if (state.enabled) {
+                            try {
+                                Reflect.apply(state.originalDescriptor.set, this, [state.rate]);
+                            } catch (error) {}
+                        }
+                        return Reflect.apply(state.originalPlay, this, args);
+                    };
+                }
+                const descriptor = Object.getOwnPropertyDescriptor(proto, 'playbackRate');
+                if (descriptor && descriptor.set !== state.guardedSetter) {
+                    Object.defineProperty(proto, 'playbackRate', {
+                        configurable: true,
+                        enumerable: state.originalDescriptor.enumerable,
+                        get: state.originalDescriptor.get,
+                        set: state.guardedSetter
+                    });
+                }
+                if (proto.play !== state.guardedPlay) {
+                    Object.defineProperty(proto, 'play', {
+                        configurable: true,
+                        writable: true,
+                        value: state.guardedPlay
+                    });
+                }
+                installPropertyGuards();
+            };
+            const apply = () => {
+                hook();
+                if (!state.enabled || !state.originalDescriptor) return;
+                document.querySelectorAll('video').forEach((video) => {
+                    try {
+                        Reflect.apply(state.originalDescriptor.set, video, [state.rate]);
+                        video.defaultPlaybackRate = state.rate;
+                    } catch (error) {}
+                });
+            };
+            window.addEventListener('message', (event) => {
+                const message = event.data;
+                if (
+                    event.source !== window
+                    || !message
+                    || message.source !== '${APP_ID}'
+                    || message.type !== 'tc-tencent-rate'
+                ) return;
+                const rate = Number(message.rate);
+                if (Number.isFinite(rate) && rate > 0) state.rate = rate;
+                state.enabled = message.enabled !== false;
+                apply();
+            });
+            ['play', 'playing', 'loadedmetadata', 'durationchange', 'ratechange'].forEach((name) => {
+                document.addEventListener(name, apply, true);
+            });
+            hook();
+            window.setInterval(apply, 400);
+        })();`;
+        try {
+            GM_addElement('script', {
+                textContent: bridgeSource,
+                type: 'text/javascript',
+                'data-tc-bridge': 'tencent-rate'
+            });
+        } catch (error) {
+            console.warn(`[${APP_ID}] 腾讯主世界桥接注入失败`, error);
         }
-        // 保持“普通 DOM 视频优先、随后按宿主顺序扫描 Shadow DOM”的既有顺序。
-        for (const shadowRoot of nestedShadowRoots) {
-            shadowRoots?.add(shadowRoot);
-            collectVideosInOpenTrees(
-                shadowRoot,
-                videos,
-                frames,
-                shadowRoots
+        try {
+            if (!unsafeWindow?.__tcTencentMainWorldBridge_v198 && unsafeWindow?.eval) {
+                unsafeWindow.eval(bridgeSource);
+            }
+        } catch (error) {
+            console.warn(`[${APP_ID}] Tencent bridge fallback injection failed`, error);
+        }
+    }
+
+    function notifyTencentMainWorld(rate, enabled) {
+        if (!isTencentVideoHost()) return;
+        try {
+            const bridgeState = unsafeWindow?.__tcTencentMainWorldBridge_v198;
+            if (bridgeState) {
+                const normalizedRate = Number(rate);
+                if (Number.isFinite(normalizedRate) && normalizedRate > 0) {
+                    bridgeState.rate = normalizedRate;
+                }
+                bridgeState.enabled = enabled !== false;
+            }
+        } catch (error) {
+            // postMessage 仍会把状态送入页面主世界。
+        }
+        window.postMessage({
+            source: APP_ID,
+            type: 'tc-tencent-rate',
+            rate: Number(rate),
+            enabled: enabled !== false
+        }, '*');
+    }
+
+    function ensureTencentPlaybackGuard(rate, enabled = true) {
+        if (!TENCENT_SPEED_CONTROL_ENABLED || !isTencentVideoHost()) return null;
+        const normalizedRate = Number(rate);
+        if (!Number.isFinite(normalizedRate) || normalizedRate <= 0) return null;
+        notifyTencentMainWorld(normalizedRate, enabled);
+        if (unsafeWindow?.__tcTencentMainWorldBridge_v198) {
+            return {mainWorld: true, rate: normalizedRate, enabled: Boolean(enabled)};
+        }
+
+        try {
+            const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+            const mediaPrototype = page.HTMLMediaElement?.prototype;
+            if (!mediaPrototype) return null;
+
+            const guardKey = '__tcPlaybackRateGuard_v195';
+            let state = mediaPrototype[guardKey];
+            if (!state) {
+                const rateDescriptor = Object.getOwnPropertyDescriptor(
+                    mediaPrototype,
+                    'playbackRate'
+                );
+                const originalPlay = mediaPrototype.play;
+                if (!rateDescriptor?.get || !rateDescriptor?.set || !rateDescriptor.configurable) {
+                    return null;
+                }
+
+                state = {
+                    enabled: Boolean(enabled),
+                    rate: normalizedRate,
+                    rateDescriptor,
+                    originalPlay,
+                    guardedRateSetter: null,
+                    guardedPlay: null
+                };
+                state.guardedRateSetter = function (requestedRate) {
+                    const effectiveRate = state.enabled ? state.rate : requestedRate;
+                    return Reflect.apply(state.rateDescriptor.set, this, [effectiveRate]);
+                };
+                state.guardedPlay = function (...args) {
+                    if (state.enabled) {
+                        try {
+                            Reflect.apply(state.rateDescriptor.set, this, [state.rate]);
+                        } catch (error) {
+                            // 非标准媒体对象仍交给原生 play() 处理。
+                        }
+                    }
+                    return Reflect.apply(state.originalPlay, this, args);
+                };
+                Object.defineProperty(mediaPrototype, guardKey, {
+                    configurable: true,
+                    value: state
+                });
+            }
+
+            state.rate = normalizedRate;
+            state.enabled = Boolean(enabled);
+            const activeDescriptor = Object.getOwnPropertyDescriptor(
+                mediaPrototype,
+                'playbackRate'
             );
+            if (activeDescriptor?.set !== state.guardedRateSetter) {
+                Object.defineProperty(mediaPrototype, 'playbackRate', {
+                    configurable: true,
+                    enumerable: state.rateDescriptor.enumerable,
+                    get: state.rateDescriptor.get,
+                    set: state.guardedRateSetter
+                });
+            }
+            if (mediaPrototype.play !== state.guardedPlay) {
+                Object.defineProperty(mediaPrototype, 'play', {
+                    configurable: true,
+                    writable: true,
+                    value: state.guardedPlay
+                });
+            }
+            return state;
+        } catch (error) {
+            console.warn(`[${APP_ID}] 腾讯倍速守护安装失败`, error);
+            return null;
         }
+    }
+
+    function collectVideosInOpenTrees(root, videos = new Set()) {
+        if (!root?.querySelectorAll) return videos;
+        root.querySelectorAll('video').forEach((video) => videos.add(video));
+        root.querySelectorAll('*').forEach((element) => {
+            if (element.shadowRoot) {
+                collectVideosInOpenTrees(element.shadowRoot, videos);
+            }
+        });
         return videos;
     }
 
-    /**
-     * 在线性时间内选择正在播放优先、可视面积最大的可用视频。
-     * 每个候选只读取一次布局，避免 sort 比较器重复触发布局测量。
-     */
-    function findBestReadyVideo(videos) {
-        let bestVideo = null;
-        let bestScore = -1;
-        for (const video of videos) {
-            if (video.readyState <= 0) continue;
-            const rect = video.getBoundingClientRect();
-            const score = (video.paused ? 0 : 1e12) + rect.width * rect.height;
-            if (score > bestScore) {
-                bestVideo = video;
-                bestScore = score;
-            }
-        }
-        return bestVideo;
-    }
-
     function startEmbeddedFrameSpeedController() {
-        if (isTencentPlaybackContext()) return;
         let framePlaybackRate = getSettings().playbackRate;
         let frameControllerEnabled = isPlaybackControlSupportedHere();
         let scanTimer = 0;
-        const pendingScanRoots = new Set();
+        let tencentPiPButton = null;
+        let frameAutomaticPiPActive = false;
+        let framePiPRestoreTimer = 0;
         const managedVideos = new WeakSet();
-        const managedChildFrames = new WeakSet();
-        const knownChildFrames = new Set();
-        const observedFrameRoots = new WeakSet();
-        let frameMutationObserver = null;
-        let lastFrameBroadcastState = '';
-        const getFramePiPVideo = () => findBestReadyVideo(
-            collectVideosInOpenTrees(document)
-        );
-        const reportFramePiP = (active, error = '', errorName = '') => {
+        ensureTencentPlaybackGuard(framePlaybackRate, frameControllerEnabled);
+        const getFramePiPVideo = () => [...collectVideosInOpenTrees(document)]
+            .filter((video) => video.readyState > 0)
+            .sort((left, right) => {
+                const leftRect = left.getBoundingClientRect();
+                const rightRect = right.getBoundingClientRect();
+                const leftScore = (left.paused ? 0 : 1e12) + leftRect.width * leftRect.height;
+                const rightScore = (right.paused ? 0 : 1e12) + rightRect.width * rightRect.height;
+                return rightScore - leftScore;
+            })[0] || null;
+        const reportFramePiP = (active, error = '') => {
             try {
                 window.parent.postMessage({
                     source: APP_ID,
                     type: FRAME_PIP_MESSAGE,
                     action: 'state',
                     active,
-                    error,
-                    errorName
+                    error
                 }, '*');
             } catch (postError) {}
         };
         const relayFramePiP = (action) => {
-            const frames = new Set();
-            collectVideosInOpenTrees(document, new Set(), frames);
-            frames.forEach((frame) => {
+            document.querySelectorAll('iframe').forEach((frame) => {
                 try {
                     frame.contentWindow?.postMessage({
                         source: APP_ID,
@@ -1737,85 +1854,129 @@
                 } catch (error) {}
             });
         };
-        const enterFramePiP = async () => {
+        const enterFramePiP = async (automatic = false) => {
             if (document.pictureInPictureElement) {
                 reportFramePiP(true);
                 return true;
             }
             const video = getFramePiPVideo();
-            if (!video || video.paused) {
-                const message = video
-                    ? '请先播放视频，再点击画中画'
-                    : '跨域播放器中尚未检测到可用视频';
-                reportFramePiP(false, message, 'NotFoundError');
-                return false;
-            }
+            if (!video || video.paused) return false;
             if (!video.requestPictureInPicture) {
-                reportFramePiP(
-                    false,
-                    '跨域播放器不支持原生画中画',
-                    'NotSupportedError'
-                );
+                reportFramePiP(false, '跨域播放器不支持原生画中画');
                 return false;
             }
             try {
                 video.disablePictureInPicture = false;
                 video.removeAttribute('disablepictureinpicture');
+                video.autoPictureInPicture = true;
+                video.setAttribute('autopictureinpicture', '');
                 await video.requestPictureInPicture();
+                frameAutomaticPiPActive = Boolean(automatic);
                 video.addEventListener('leavepictureinpicture', () => {
+                    frameAutomaticPiPActive = false;
                     reportFramePiP(false);
                 }, {once: true});
                 reportFramePiP(true);
                 return true;
             } catch (error) {
-                const errorName = error?.name || 'PictureInPictureError';
-                reportFramePiP(
-                    false,
-                    error?.message || '跨域播放器拒绝画中画',
-                    errorName
-                );
+                reportFramePiP(false, error?.message || '跨域播放器拒绝画中画');
                 return false;
             }
         };
         const exitFramePiP = async () => {
+            clearTimeout(framePiPRestoreTimer);
+            framePiPRestoreTimer = 0;
+            frameAutomaticPiPActive = false;
             if (!document.pictureInPictureElement) return;
             try {
                 await document.exitPictureInPicture();
             } catch (error) {}
             reportFramePiP(false);
         };
+        const isTencentPlaybackFrame = () => (
+            /(^|\.)(qq\.com|gtimg\.com)$/i.test(location.hostname)
+            || /(^|\.)v\.qq\.com$/i.test(location.hostname)
+            || /https?:\/\/(?:[^/]+\.)?v\.qq\.com\//i.test(document.referrer)
+        );
+        const positionTencentPiPButton = () => {
+            if (!tencentPiPButton) return;
+            const video = getFramePiPVideo();
+            if (!video) {
+                tencentPiPButton.hidden = true;
+                return;
+            }
+            const rect = video.getBoundingClientRect();
+            tencentPiPButton.hidden = rect.width < 160 || rect.height < 90;
+            if (tencentPiPButton.hidden) return;
+            tencentPiPButton.style.left = `${Math.max(8, rect.right - 92)}px`;
+            tencentPiPButton.style.top = `${Math.max(8, rect.top + 12)}px`;
+        };
+        const ensureTencentPiPButton = () => {
+            if (!isTencentPlaybackFrame() || tencentPiPButton) {
+                positionTencentPiPButton();
+                return;
+            }
+            const video = getFramePiPVideo();
+            if (!video) return;
+            tencentPiPButton = document.createElement('button');
+            tencentPiPButton.type = 'button';
+            tencentPiPButton.textContent = '画中画';
+            tencentPiPButton.title = '开启腾讯视频原生画中画';
+            Object.assign(tencentPiPButton.style, {
+                position: 'fixed',
+                zIndex: '2147483647',
+                width: '72px',
+                height: '32px',
+                padding: '0',
+                border: '1px solid rgba(255,255,255,.42)',
+                borderRadius: '9px',
+                color: '#fff',
+                background: 'rgba(15,23,42,.72)',
+                boxShadow: '0 5px 18px rgba(0,0,0,.28)',
+                backdropFilter: 'blur(8px)',
+                cursor: 'pointer',
+                font: '12px/30px "Microsoft YaHei",sans-serif'
+            });
+            tencentPiPButton.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const opened = await enterFramePiP();
+                if (!opened) {
+                    tencentPiPButton.title = '腾讯播放器拒绝画中画，请确认视频正在播放';
+                }
+            });
+            document.body.appendChild(tencentPiPButton);
+            positionTencentPiPButton();
+        };
+        const syncFrameAutoPiPAction = () => {
+            if (!navigator.mediaSession) return;
+            try {
+                navigator.mediaSession.setActionHandler(
+                    'enterpictureinpicture',
+                    getSettings().autoPiP ? () => enterFramePiP(true) : null
+                );
+            } catch (error) {
+                // 当前浏览器尚未开放自动画中画 Media Session 动作。
+            }
+        };
+        syncFrameAutoPiPAction();
+
         const setFrameVideoRate = (video) => {
             if (!frameControllerEnabled) return;
             forceVideoPlaybackRate(video, framePlaybackRate);
         };
-        const postFrameState = (frame) => {
-            try {
-                frame.contentWindow?.postMessage({
-                    source: APP_ID,
-                    type: FRAME_CONTROL_MESSAGE,
-                    enabled: frameControllerEnabled,
-                    rate: framePlaybackRate
-                }, '*');
-            } catch (error) {
-                // 已卸载或受保护的 iframe 可能暂时没有可用的 contentWindow。
-            }
-        };
-        const registerChildFrame = (frame) => {
-            const isNew = !knownChildFrames.has(frame);
-            knownChildFrames.add(frame);
-            if (!managedChildFrames.has(frame)) {
-                managedChildFrames.add(frame);
-                frame.addEventListener('load', () => postFrameState(frame));
-            }
-            if (isNew) postFrameState(frame);
-        };
-        const broadcastFrameState = (force = false) => {
-            const state = `${frameControllerEnabled ? 1 : 0}|${framePlaybackRate}`;
-            if (!force && state === lastFrameBroadcastState) return;
-            lastFrameBroadcastState = state;
-            knownChildFrames.forEach((frame) => {
-                if (frame.isConnected) postFrameState(frame);
-                else knownChildFrames.delete(frame);
+        const broadcastFrameState = () => {
+            document.querySelectorAll('iframe').forEach((frame) => {
+                try {
+                    frame.contentWindow?.postMessage({
+                        source: APP_ID,
+                        type: FRAME_CONTROL_MESSAGE,
+                        enabled: frameControllerEnabled,
+                        rate: framePlaybackRate
+                    }, '*');
+                } catch (error) {
+                    // 已卸载或受保护的 iframe 可能暂时没有可用的 contentWindow。
+                }
             });
         };
         const attachFrameVideo = (video) => {
@@ -1829,64 +1990,47 @@
                     'playing',
                     'ratechange'
                 ].forEach((eventName) => {
-                    video.addEventListener(eventName, () => setFrameVideoRate(video));
+                    video.addEventListener(eventName, () => {
+                        setFrameVideoRate(video);
+                        if (eventName === 'play' || eventName === 'playing') {
+                            window.setTimeout(syncFrameAutoPiPAction, 0);
+                        }
+                    });
                 });
             }
             setFrameVideoRate(video);
         };
-        const scanFrameVideos = (roots = null) => {
+        const scanFrameVideos = () => {
             const savedRate = getSettings().playbackRate;
             if (Math.abs(savedRate - framePlaybackRate) > .001) {
                 framePlaybackRate = savedRate;
             }
-            const videos = new Set();
-            const frames = new Set();
-            const shadowRoots = new Set();
-            if (roots?.length) {
-                roots.forEach((root) => (
-                    collectVideosInOpenTrees(root, videos, frames, shadowRoots)
-                ));
-            } else {
-                knownChildFrames.forEach((frame) => {
-                    if (!frame.isConnected) knownChildFrames.delete(frame);
-                });
-                collectVideosInOpenTrees(document, videos, frames, shadowRoots);
-            }
-            shadowRoots.forEach((shadowRoot) => {
-                if (!frameMutationObserver || observedFrameRoots.has(shadowRoot)) return;
-                observedFrameRoots.add(shadowRoot);
-                frameMutationObserver.observe(shadowRoot, {childList: true, subtree: true});
-            });
-            frames.forEach(registerChildFrame);
+            ensureTencentPlaybackGuard(framePlaybackRate, frameControllerEnabled);
             if (frameControllerEnabled) {
-                videos.forEach(attachFrameVideo);
+                collectVideosInOpenTrees(document).forEach(attachFrameVideo);
             }
             broadcastFrameState();
         };
         const scheduleFrameScan = (records) => {
             if (Array.isArray(records) || records instanceof Array) {
-                records.forEach((record) => {
-                    record.addedNodes.forEach((node) => {
-                        // 新增宿主可能在开放 Shadow Root 内含媒体，不能只用普通选择器判断。
-                        if (node.nodeType === Node.ELEMENT_NODE) pendingScanRoots.add(node);
-                    });
-                });
-                if (!pendingScanRoots.size) return;
+                const hasNewMedia = records.some((record) => [...record.addedNodes].some((node) => (
+                    node.nodeType === Node.ELEMENT_NODE
+                    && (
+                        node.matches?.('video, iframe')
+                        || node.querySelector?.('video, iframe')
+                    )
+                )));
+                if (!hasNewMedia) return;
             }
             clearTimeout(scanTimer);
-            scanTimer = window.setTimeout(() => {
-                const roots = [...pendingScanRoots];
-                pendingScanRoots.clear();
-                scanFrameVideos(roots.length ? roots : null);
-            }, 120);
+            scanTimer = window.setTimeout(scanFrameVideos, 120);
         };
 
-        frameMutationObserver = new MutationObserver(scheduleFrameScan);
-        frameMutationObserver.observe(
+        scanFrameVideos();
+        new MutationObserver(scheduleFrameScan).observe(
             document.documentElement,
             {childList: true, subtree: true}
         );
-        scanFrameVideos();
         window.setInterval(() => {
             if (!document.hidden) {
                 scanFrameVideos();
@@ -1895,6 +2039,14 @@
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 scanFrameVideos();
+                clearTimeout(framePiPRestoreTimer);
+                framePiPRestoreTimer = window.setTimeout(() => {
+                    exitFramePiP();
+                    relayFramePiP('exit');
+                }, 550);
+            } else if (getSettings().autoPiP) {
+                enterFramePiP(true);
+                relayFramePiP('enter');
             }
         });
         window.addEventListener('message', (event) => {
@@ -1940,6 +2092,7 @@
         });
         if (typeof GM_addValueChangeListener === 'function') {
             GM_addValueChangeListener(SETTINGS_KEY, (_key, _oldValue, newValue) => {
+                syncFrameAutoPiPAction();
                 const nextRate = Number(newValue?.playbackRate);
                 if (
                     Number.isFinite(nextRate)
@@ -2090,6 +2243,10 @@
                             <span>松手后自动吸附屏幕边缘</span>
                             <input data-setting="edge-snap" type="checkbox" ${settings.edgeSnap ? 'checked' : ''}>
                         </label>
+                        <label class="tc-setting-check">
+                            <span>离开播放页面时自动画中画</span>
+                            <input data-setting="auto-pip" type="checkbox" ${settings.autoPiP ? 'checked' : ''}>
+                        </label>
                         ${targetMode ? '' : `
                             <div class="tc-route-settings" ${settings.defaultAction === 'route' ? '' : 'hidden'}>
                                 <label class="tc-setting-label">
@@ -2177,13 +2334,9 @@
         let runtimeSettings = settings;
         let currentPlaybackRate = settings.playbackRate;
         let playbackControllerEnabled = true;
-        let launcherWidth = launcherWrap.offsetWidth || 48;
-        let launcherHeight = launcherWrap.offsetHeight || 48;
-        let launcherPoint = {x: 12, y: Math.max(8, (window.innerHeight - launcherHeight) / 2)};
-        let resizeFrame = 0;
+        let launcherPoint = {x: 12, y: Math.max(8, (window.innerHeight - launcherWrap.offsetHeight) / 2)};
         let dimTimer = 0;
         let speedScanTimer = 0;
-        const pendingVideoRoots = new Set();
         let speedAutoCloseTimer = 0;
         let panelHardCloseTimer = 0;
         let panelOpenedAt = 0;
@@ -2194,80 +2347,48 @@
         let pipMovedElement = null;
         let pipOriginalStyle = null;
         let pipMovedLayers = [];
-        let pipHiddenVideo = null;
-        let pipHiddenOpacity = '';
-        let pipHiddenOpacityPriority = '';
         let pipResizeTimer = 0;
         let mediaSessionVideo = null;
         let previousMediaMetadata = null;
+        let automaticPiPActive = false;
+        let automaticPiPRestoreTimer = 0;
         const managedVideos = new WeakSet();
         const managedFrames = new WeakSet();
-        const knownVideos = new Set();
-        const knownFrames = new Set();
-        const observedPageRoots = new WeakSet();
-        let pageMediaObserver = null;
-        let lastBroadcastState = '';
-        if (isPlaybackControlSupportedHere()) {
-            pageMediaObserver = new MutationObserver((records) => {
-                const addedMediaRoots = [];
-                records.forEach((record) => {
-                    record.addedNodes.forEach((node) => {
-                        // 每次只遍历新增子树，同时覆盖新增的开放 Shadow Root 宿主。
-                        if (node.nodeType === Node.ELEMENT_NODE) addedMediaRoots.push(node);
-                    });
-                });
-                // MutationObserver 回调异步执行，此时扫描调度器已经完成初始化。
-                if (addedMediaRoots.length) scheduleVideoScan(addedMediaRoots);
-            });
-            pageMediaObserver.observe(
-                document.documentElement,
-                {childList: true, subtree: true}
-            );
-        }
+        ensureTencentPlaybackGuard(currentPlaybackRate, playbackControllerEnabled);
 
         const saveSettingPatch = (patch) => {
             runtimeSettings = {...getSettings(), ...patch};
             saveSettings(runtimeSettings);
         };
         const formatPlaybackRate = (rate) => String(Number(Number(rate).toFixed(2)));
-        const postPlaybackControllerState = (frame) => {
-            try {
-                frame.contentWindow?.postMessage({
-                    source: APP_ID,
-                    type: FRAME_CONTROL_MESSAGE,
-                    enabled: playbackControllerEnabled,
-                    rate: currentPlaybackRate
-                }, '*');
-            } catch (error) {
-                // 已卸载或受保护的 iframe 可能暂时没有可用的 contentWindow。
-            }
-        };
-        const broadcastPlaybackControllerState = (force = false) => {
-            const state = `${playbackControllerEnabled ? 1 : 0}|${currentPlaybackRate}`;
-            if (!force && state === lastBroadcastState) return;
-            lastBroadcastState = state;
-            knownFrames.forEach(postPlaybackControllerState);
+        const broadcastPlaybackControllerState = () => {
+            document.querySelectorAll('iframe').forEach((frame) => {
+                try {
+                    frame.contentWindow?.postMessage({
+                        source: APP_ID,
+                        type: FRAME_CONTROL_MESSAGE,
+                        enabled: playbackControllerEnabled,
+                        rate: currentPlaybackRate
+                    }, '*');
+                } catch (error) {
+                    // 已卸载或受保护的 iframe 可能暂时没有可用的 contentWindow。
+                }
+            });
         };
         const positionSpeedPopover = () => {
             if (speedPopover.hidden) return;
             const panelRect = panel.getBoundingClientRect();
-            const nextLeft = `${Math.round(panelRect.left)}px`;
-            const nextTop = `${Math.round(panelRect.top)}px`;
-            const nextWidth = `${Math.round(panelRect.width)}px`;
-            const nextHeight = `${Math.round(panelRect.height)}px`;
-            if (speedPopover.style.left !== nextLeft) speedPopover.style.left = nextLeft;
-            if (speedPopover.style.top !== nextTop) speedPopover.style.top = nextTop;
-            if (speedPopover.style.width !== nextWidth) speedPopover.style.width = nextWidth;
-            if (speedPopover.style.height !== nextHeight) speedPopover.style.height = nextHeight;
+            speedPopover.style.left = `${Math.round(panelRect.left)}px`;
+            speedPopover.style.top = `${Math.round(panelRect.top)}px`;
+            speedPopover.style.width = `${Math.round(panelRect.width)}px`;
+            speedPopover.style.height = `${Math.round(panelRect.height)}px`;
         };
         const positionPanel = () => {
             if (!root.classList.contains('tc-open')) return;
-            if (panel.style.maxHeight !== 'calc(100vh - 16px)') {
-                panel.style.maxHeight = 'calc(100vh - 16px)';
-            }
+            panel.style.maxHeight = 'calc(100vh - 16px)';
             const panelWidth = panel.offsetWidth || Math.min(300, window.innerWidth - 16);
             const panelHeight = panel.offsetHeight || 330;
-            const launcherSize = launcherWidth;
+            const launcherSize = launcherWrap.offsetWidth || 48;
             const gap = 10;
             const left = Math.min(
                 window.innerWidth - panelWidth - 8,
@@ -2277,87 +2398,32 @@
             const top = above >= 8
                 ? above
                 : Math.min(window.innerHeight - panelHeight - 8, launcherPoint.y + launcherSize + gap);
-            const nextLeft = `${Math.max(8, left)}px`;
-            const nextTop = `${Math.max(8, top)}px`;
-            if (panel.style.left !== nextLeft) panel.style.left = nextLeft;
-            if (panel.style.top !== nextTop) panel.style.top = nextTop;
+            panel.style.left = `${Math.max(8, left)}px`;
+            panel.style.top = `${Math.max(8, top)}px`;
             requestAnimationFrame(positionSpeedPopover);
         };
-        const collectPageVideos = (roots = null) => {
-            const discoveredVideos = new Set();
-            const discoveredFrames = new Set();
-            const discoveredShadowRoots = new Set();
-            const scanRoots = roots?.length ? roots : [document];
-            if (!roots?.length) {
-                knownVideos.clear();
-                knownFrames.forEach((frame) => {
-                    if (!frame.isConnected) knownFrames.delete(frame);
-                });
-            }
-            scanRoots.forEach((scanRoot) => {
-                collectVideosInOpenTrees(
-                    scanRoot,
-                    discoveredVideos,
-                    discoveredFrames,
-                    discoveredShadowRoots
-                );
-            });
-            discoveredShadowRoots.forEach((shadowRoot) => {
-                if (!pageMediaObserver || observedPageRoots.has(shadowRoot)) return;
-                observedPageRoots.add(shadowRoot);
-                pageMediaObserver.observe(shadowRoot, {childList: true, subtree: true});
-            });
-            discoveredVideos.forEach((video) => knownVideos.add(video));
-
-            // 同源 iframe 继续递归收集；跨域 iframe 由其自身的嵌入控制器负责。
-            const frameQueue = [...discoveredFrames];
-            for (let index = 0; index < frameQueue.length; index += 1) {
-                const frame = frameQueue[index];
-                const isNewFrame = !knownFrames.has(frame);
-                knownFrames.add(frame);
+        const collectPageVideos = () => {
+            const videos = collectVideosInOpenTrees(document);
+            document.querySelectorAll('iframe').forEach((frame) => {
                 if (!managedFrames.has(frame)) {
                     managedFrames.add(frame);
                     frame.addEventListener('load', () => {
-                        postPlaybackControllerState(frame);
-                        window.setTimeout(() => syncVideoPlaybackRates([frame]), 100);
+                        broadcastPlaybackControllerState();
+                        window.setTimeout(() => syncVideoPlaybackRates(), 100);
                     });
                 }
-                if (isNewFrame) postPlaybackControllerState(frame);
                 try {
                     if (frame.contentDocument) {
-                        const nestedFrames = new Set();
-                        collectVideosInOpenTrees(
-                            frame.contentDocument,
-                            discoveredVideos,
-                            nestedFrames,
-                            discoveredShadowRoots
-                        );
-                        discoveredShadowRoots.forEach((shadowRoot) => {
-                            if (!pageMediaObserver || observedPageRoots.has(shadowRoot)) return;
-                            observedPageRoots.add(shadowRoot);
-                            pageMediaObserver.observe(
-                                shadowRoot,
-                                {childList: true, subtree: true}
-                            );
-                        });
-                        nestedFrames.forEach((nestedFrame) => {
-                            if (!discoveredFrames.has(nestedFrame)) {
-                                discoveredFrames.add(nestedFrame);
-                                frameQueue.push(nestedFrame);
-                            }
-                        });
+                        collectVideosInOpenTrees(frame.contentDocument, videos);
                     }
                 } catch (error) {
                     // 浏览器禁止访问跨域 iframe；其中的视频无法由外层页面直接调速。
                 }
-            }
-            discoveredVideos.forEach((video) => knownVideos.add(video));
-            return [...knownVideos].filter((video) => video.isConnected);
+            });
+            return [...videos];
         };
         const broadcastFramePiP = (action) => {
-            const frames = new Set(knownFrames);
-            collectVideosInOpenTrees(document, new Set(), frames);
-            frames.forEach((frame) => {
+            document.querySelectorAll('iframe').forEach((frame) => {
                 try {
                     frame.contentWindow?.postMessage({
                         source: APP_ID,
@@ -2368,7 +2434,15 @@
             });
         };
         const getBestPiPVideo = () => {
-            return findBestReadyVideo(collectPageVideos());
+            return collectPageVideos()
+                .filter((video) => video.readyState > 0)
+                .sort((left, right) => {
+                    const leftRect = left.getBoundingClientRect();
+                    const rightRect = right.getBoundingClientRect();
+                    const leftScore = (left.paused ? 0 : 1e12) + leftRect.width * leftRect.height;
+                    const rightScore = (right.paused ? 0 : 1e12) + rightRect.width * rightRect.height;
+                    return rightScore - leftScore;
+                })[0] || null;
         };
         const seekPiPVideo = (delta) => {
             if (!pipVideo) return;
@@ -2488,21 +2562,6 @@
             });
         };
         const restoreDocumentPiPElements = () => {
-            if (pipHiddenVideo) {
-                if (pipHiddenOpacity) {
-                    pipHiddenVideo.style.setProperty(
-                        'opacity',
-                        pipHiddenOpacity,
-                        pipHiddenOpacityPriority
-                    );
-                } else {
-                    pipHiddenVideo.style.removeProperty('opacity');
-                }
-                refreshVideoSurface(pipHiddenVideo);
-            }
-            pipHiddenVideo = null;
-            pipHiddenOpacity = '';
-            pipHiddenOpacityPriority = '';
             pipMovedLayers.reverse().forEach(({element, placeholder, style, addedClasses}) => {
                 if (placeholder.parentNode) placeholder.replaceWith(element);
                 addedClasses.forEach((className) => element.classList.remove(className));
@@ -2521,6 +2580,9 @@
         };
         const closeManagedPiP = async () => {
             broadcastFramePiP('exit');
+            clearTimeout(automaticPiPRestoreTimer);
+            automaticPiPRestoreTimer = 0;
+            automaticPiPActive = false;
             const exitingVideo = pipVideo;
             if (pipWindow && !pipWindow.closed) {
                 pipWindow.close();
@@ -2555,6 +2617,8 @@
                 '.iqp-subtitle-box',
                 '.iqp-subtitle-container',
                 '.iqp-player-subtitle',
+                '.txp_subtitle',
+                '.txp-subtitle',
                 '.youku-layer-subtitle',
                 '.kui-subtitle',
                 '.bili-subtitle-x-subtitle-panel',
@@ -2603,8 +2667,6 @@
         const buildDocumentPiP = async (video) => {
             const pipApi = window.documentPictureInPicture || unsafeWindow?.documentPictureInPicture;
             if (!pipApi?.requestWindow || !video?.ownerDocument) return false;
-            const douyinMirrorMode = isDouyinVideoHost();
-            let douyinMirrorVideo = null;
             const subtitleLayers = findSubtitleLayers(video);
             const requestedWindow = await pipApi.requestWindow({
                 width: runtimeSettings.pipWidth,
@@ -2887,93 +2949,32 @@
             pipRoot.append(stage, controls, bottom);
             requestedWindow.document.body.appendChild(pipRoot);
 
-            /**
-             * 将当前播放节点移入文档画中画；抖音切换作品后可复用该方法接管新节点。
-             * @param {HTMLVideoElement} nextVideo 新的活动视频节点。
-             */
-            const moveVideoIntoDocumentPiP = (nextVideo) => {
-                if (!nextVideo || nextVideo === pipMovedElement) return;
-                if (pipMovedElement && pipPlaceholder?.parentNode) {
-                    const previousVideo = pipMovedElement;
-                    pipPlaceholder.replaceWith(previousVideo);
-                    if (pipOriginalStyle === null) previousVideo.removeAttribute('style');
-                    else previousVideo.setAttribute('style', pipOriginalStyle);
-                    refreshVideoSurface(previousVideo);
-                }
-                sourceParent = nextVideo.parentElement;
-                sourceRect = nextVideo.getBoundingClientRect();
-                pipPlaceholder = nextVideo.ownerDocument.createComment('tc-pip-video-placeholder');
-                pipMovedElement = nextVideo;
-                pipOriginalStyle = nextVideo.getAttribute('style');
-                nextVideo.replaceWith(pipPlaceholder);
-                stage.appendChild(nextVideo);
-                [
-                    ['position', 'absolute'],
-                    ['inset', '0'],
-                    ['width', '100%'],
-                    ['min-width', '0'],
-                    ['max-width', 'none'],
-                    ['height', '100%'],
-                    ['min-height', '0'],
-                    ['max-height', 'none'],
-                    ['margin', '0'],
-                    ['padding', '0'],
-                    ['display', 'block'],
-                    ['float', 'none'],
-                    ['object-fit', 'cover'],
-                    ['object-position', 'center center'],
-                    ['transform', 'none'],
-                    ['clip-path', 'none']
-                ].forEach(([property, value]) => {
-                    nextVideo.style.setProperty(property, value, 'important');
-                });
-                pipVideo = nextVideo;
-            };
-            /**
-             * 在不移动抖音原视频节点的前提下，将其捕获流镜像到画中画窗口。
-             * @param {HTMLVideoElement} sourceVideo 当前页面正在播放的视频。
-             */
-            const mirrorDouyinVideo = (sourceVideo) => {
-                if (!sourceVideo || sourceVideo === pipHiddenVideo) return false;
-                const captureStream = sourceVideo.captureStream || sourceVideo.mozCaptureStream;
-                if (typeof captureStream !== 'function') {
-                    throw new Error('当前浏览器不支持视频流镜像');
-                }
-                if (pipHiddenVideo) {
-                    if (pipHiddenOpacity) {
-                        pipHiddenVideo.style.setProperty(
-                            'opacity',
-                            pipHiddenOpacity,
-                            pipHiddenOpacityPriority
-                        );
-                    } else {
-                        pipHiddenVideo.style.removeProperty('opacity');
-                    }
-                }
-                const mediaStream = captureStream.call(sourceVideo);
-                if (!mediaStream?.getVideoTracks?.().length) {
-                    throw new Error('未能捕获抖音视频画面');
-                }
-                pipHiddenVideo = sourceVideo;
-                pipHiddenOpacity = sourceVideo.style.getPropertyValue('opacity');
-                pipHiddenOpacityPriority = sourceVideo.style.getPropertyPriority('opacity');
-                sourceVideo.style.setProperty('opacity', '0', 'important');
-                pipVideo = sourceVideo;
-                douyinMirrorVideo.srcObject = mediaStream;
-                douyinMirrorVideo.play().catch(() => {});
-                return true;
-            };
-            if (douyinMirrorMode) {
-                douyinMirrorVideo = requestedWindow.document.createElement('video');
-                douyinMirrorVideo.autoplay = true;
-                douyinMirrorVideo.muted = true;
-                douyinMirrorVideo.playsInline = true;
-                stage.appendChild(douyinMirrorVideo);
-                mirrorDouyinVideo(video);
-            } else {
-                moveVideoIntoDocumentPiP(video);
-            }
-            if (!douyinMirrorMode) subtitleLayers.forEach(({element: layer, fullLayer}) => {
+            pipPlaceholder = document.createComment('tc-pip-video-placeholder');
+            pipMovedElement = video;
+            pipOriginalStyle = video.getAttribute('style');
+            video.replaceWith(pipPlaceholder);
+            stage.appendChild(video);
+            [
+                ['position', 'absolute'],
+                ['inset', '0'],
+                ['width', '100%'],
+                ['min-width', '0'],
+                ['max-width', 'none'],
+                ['height', '100%'],
+                ['min-height', '0'],
+                ['max-height', 'none'],
+                ['margin', '0'],
+                ['padding', '0'],
+                ['display', 'block'],
+                ['float', 'none'],
+                ['object-fit', 'cover'],
+                ['object-position', 'center center'],
+                ['transform', 'none'],
+                ['clip-path', 'none']
+            ].forEach(([property, value]) => {
+                video.style.setProperty(property, value, 'important');
+            });
+            subtitleLayers.forEach(({element: layer, fullLayer}) => {
                 const placeholder = document.createComment('tc-pip-subtitle-placeholder');
                 const originalStyle = layer.getAttribute('style');
                 const addedClasses = [];
@@ -2999,231 +3000,27 @@
                 return `${minutes}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
             };
             const syncControls = () => {
-                const activeVideo = pipVideo || video;
-                play.textContent = activeVideo.paused ? '▶' : '⏸';
-                time.textContent = `${formatTime(activeVideo.currentTime)} / ${formatTime(activeVideo.duration)}`;
-                progress.max = String(Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0);
+                play.textContent = video.paused ? '▶' : '⏸';
+                time.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+                progress.max = String(Number.isFinite(video.duration) ? video.duration : 0);
                 if (requestedWindow.document.activeElement !== progress) {
-                    progress.value = String(activeVideo.currentTime || 0);
+                    progress.value = String(video.currentTime || 0);
                 }
                 backward.textContent = `−${runtimeSettings.pipSeekSeconds}s`;
                 forward.textContent = `+${runtimeSettings.pipSeekSeconds}s`;
             };
             backward.addEventListener('click', () => seekPiPVideo(-runtimeSettings.pipSeekSeconds));
             forward.addEventListener('click', () => seekPiPVideo(runtimeSettings.pipSeekSeconds));
-            play.addEventListener('click', () => {
-                if (!pipVideo) return;
-                if (pipVideo.paused) pipVideo.play().catch(() => {});
-                else pipVideo.pause();
-            });
+            play.addEventListener('click', () => video.paused ? video.play() : video.pause());
             progress.addEventListener('input', () => {
-                time.textContent = `${formatTime(Number(progress.value))} / ${formatTime(pipVideo?.duration)}`;
+                time.textContent = `${formatTime(Number(progress.value))} / ${formatTime(video.duration)}`;
             });
             progress.addEventListener('change', () => {
-                if (pipVideo) pipVideo.currentTime = Number(progress.value);
+                video.currentTime = Number(progress.value);
             });
-            const boundDocumentPiPVideos = new WeakSet();
-            const bindDocumentPiPVideo = (targetVideo) => {
-                if (boundDocumentPiPVideos.has(targetVideo)) return;
-                boundDocumentPiPVideos.add(targetVideo);
-                ['play', 'pause', 'timeupdate', 'durationchange'].forEach((name) => {
-                    targetVideo.addEventListener(name, syncControls);
-                });
-            };
-            let douyinSyncTimer = 0;
-            if (douyinMirrorMode) {
-                let wheelDistance = 0;
-                let wheelResetTimer = 0;
-                let wheelLockedUntil = 0;
-                /**
-                 * 从页面中选择最接近视口中心且正在播放的抖音视频。
-                 * @returns {HTMLVideoElement|null} 当前活动视频。
-                 */
-                const findActiveDouyinVideo = () => {
-                    let bestVideo = null;
-                    let bestScore = Number.NEGATIVE_INFINITY;
-                    collectPageVideos().forEach((candidate) => {
-                        if (
-                            candidate.ownerDocument !== document
-                            || candidate.readyState <= HTMLMediaElement.HAVE_NOTHING
-                        ) return;
-                        const rect = candidate.getBoundingClientRect();
-                        const visibleWidth = Math.max(
-                            0,
-                            Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0)
-                        );
-                        const visibleHeight = Math.max(
-                            0,
-                            Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0)
-                        );
-                        const visibleArea = visibleWidth * visibleHeight;
-                        const centerDistance = Math.abs(
-                            rect.top + rect.height / 2 - window.innerHeight / 2
-                        );
-                        const score = (candidate.paused ? 0 : 1e12)
-                            + visibleArea * 1000
-                            - centerDistance;
-                        if (score > bestScore) {
-                            bestVideo = candidate;
-                            bestScore = score;
-                        }
-                    });
-                    return bestVideo;
-                };
-                /**
-                 * 查找抖音页面右侧自带的上一个/下一个切换按钮。
-                 * @param {number} direction 向下为 1，向上为 -1。
-                 * @returns {HTMLElement|null} 可点击的切换按钮。
-                 */
-                const findDouyinSwitchButton = (direction) => {
-                    const directionPattern = direction > 0
-                        ? /下一个|下一条|下滑|向下|arrow.?down|switch.?down|feed.?next/i
-                        : /上一个|上一条|上滑|向上|arrow.?up|switch.?up|feed.?prev/i;
-                    const controls = [...document.querySelectorAll('button, [role="button"]')]
-                        .map((element) => ({
-                            element,
-                            rect: element.getBoundingClientRect(),
-                            label: [
-                                element.getAttribute('aria-label'),
-                                element.getAttribute('title'),
-                                element.getAttribute('data-e2e'),
-                                element.className,
-                                element.textContent
-                            ].filter(Boolean).join(' ')
-                        }))
-                        .filter(({element, rect}) => {
-                            const style = getComputedStyle(element);
-                            return rect.width >= 18
-                                && rect.width <= 90
-                                && rect.height >= 18
-                                && rect.height <= 90
-                                && rect.bottom > 0
-                                && rect.top < window.innerHeight
-                                && style.display !== 'none'
-                                && style.visibility !== 'hidden'
-                                && Number(style.opacity) !== 0;
-                        });
-                    const labelled = controls.find(({label}) => directionPattern.test(label));
-                    if (labelled) return labelled.element;
-                    const edgeControls = controls
-                        .filter(({element, rect}) => (
-                            rect.right > window.innerWidth - 85
-                            && rect.top > window.innerHeight * .2
-                            && rect.bottom < window.innerHeight * .9
-                            && element.querySelector('svg')
-                        ))
-                        .sort((left, right) => left.rect.top - right.rect.top);
-                    let bestPair = null;
-                    edgeControls.forEach((upper, index) => {
-                        edgeControls.slice(index + 1).forEach((lower) => {
-                            const xDistance = Math.abs(
-                                upper.rect.left + upper.rect.width / 2
-                                - lower.rect.left - lower.rect.width / 2
-                            );
-                            const verticalGap = lower.rect.top - upper.rect.bottom;
-                            if (xDistance > 12 || verticalGap < -4 || verticalGap > 80) return;
-                            if (!bestPair || lower.rect.right > bestPair.lower.rect.right) {
-                                bestPair = {upper, lower};
-                            }
-                        });
-                    });
-                    return direction > 0
-                        ? bestPair?.lower.element || null
-                        : bestPair?.upper.element || null;
-                };
-                /**
-                 * 将页面信息流滚动到相邻视频；优先使用真实相邻节点和浏览器原生滚动。
-                 * @param {number} direction 向下为 1，向上为 -1。
-                 */
-                const scrollDouyinFeed = (direction) => {
-                    const switchButton = findDouyinSwitchButton(direction);
-                    if (switchButton) {
-                        switchButton.click();
-                        return;
-                    }
-                    const currentVideo = pipVideo;
-                    const currentRect = currentVideo?.getBoundingClientRect();
-                    const candidates = collectPageVideos()
-                        .filter((candidate) => (
-                            candidate !== currentVideo
-                            && candidate.ownerDocument === document
-                        ))
-                        .map((candidate) => ({
-                            video: candidate,
-                            rect: candidate.getBoundingClientRect()
-                        }))
-                        .filter(({rect}) => (
-                            direction > 0
-                                ? rect.top > (currentRect?.top ?? 0) + 20
-                                : rect.top < (currentRect?.top ?? 0) - 20
-                        ))
-                        .sort((left, right) => (
-                            direction > 0
-                                ? left.rect.top - right.rect.top
-                                : right.rect.top - left.rect.top
-                        ));
-                    if (candidates[0]) {
-                        candidates[0].video.scrollIntoView({
-                            behavior: 'smooth',
-                            block: 'center',
-                            inline: 'nearest'
-                        });
-                        return;
-                    }
-                    let scrollContainer = currentVideo?.parentElement;
-                    while (scrollContainer && scrollContainer !== document.body) {
-                        const style = getComputedStyle(scrollContainer);
-                        if (
-                            /(auto|scroll|overlay)/.test(style.overflowY)
-                            && scrollContainer.scrollHeight > scrollContainer.clientHeight + 2
-                        ) {
-                            scrollContainer.scrollBy({
-                                top: direction * Math.max(
-                                    scrollContainer.clientHeight,
-                                    window.innerHeight * .8
-                                ),
-                                behavior: 'smooth'
-                            });
-                            return;
-                        }
-                        scrollContainer = scrollContainer.parentElement;
-                    }
-                    (document.scrollingElement || document.documentElement).scrollBy({
-                        top: direction * window.innerHeight,
-                        behavior: 'smooth'
-                    });
-                };
-                const syncDouyinMirror = () => {
-                    const nextVideo = findActiveDouyinVideo();
-                    if (!nextVideo || nextVideo === pipVideo) return;
-                    mirrorDouyinVideo(nextVideo);
-                    bindDocumentPiPVideo(nextVideo);
-                    clearMediaSessionPiPActions();
-                    installMediaSessionPiPActions();
-                    syncControls();
-                };
-                requestedWindow.document.addEventListener('wheel', (event) => {
-                    if (event.target instanceof requestedWindow.HTMLInputElement) return;
-                    event.preventDefault();
-                    const pixelDelta = event.deltaMode === WheelEvent.DOM_DELTA_LINE
-                        ? event.deltaY * 40
-                        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-                            ? event.deltaY * requestedWindow.innerHeight
-                            : event.deltaY;
-                    wheelDistance += pixelDelta;
-                    requestedWindow.clearTimeout(wheelResetTimer);
-                    wheelResetTimer = requestedWindow.setTimeout(() => {
-                        wheelDistance = 0;
-                    }, 180);
-                    if (Math.abs(wheelDistance) < 45 || Date.now() < wheelLockedUntil) return;
-                    const direction = Math.sign(wheelDistance);
-                    wheelDistance = 0;
-                    wheelLockedUntil = Date.now() + 550;
-                    scrollDouyinFeed(direction);
-                }, {capture: true, passive: false});
-                douyinSyncTimer = requestedWindow.setInterval(syncDouyinMirror, 200);
-            }
-            bindDocumentPiPVideo(video);
+            ['play', 'pause', 'timeupdate', 'durationchange'].forEach((name) => {
+                video.addEventListener(name, syncControls);
+            });
             syncControls();
             requestedWindow.addEventListener('resize', () => {
                 clearTimeout(pipResizeTimer);
@@ -3239,47 +3036,151 @@
                 }, 120);
             });
             requestedWindow.addEventListener('pagehide', () => {
-                const exitingVideo = pipVideo;
-                requestedWindow.clearInterval(douyinSyncTimer);
-                if (douyinMirrorVideo) douyinMirrorVideo.srcObject = null;
                 restoreDocumentPiPElements();
                 pipWindow = null;
                 pipVideo = null;
                 clearMediaSessionPiPActions();
                 updatePiPToggle(false);
-                refreshVideoSurface(exitingVideo);
             }, {once: true});
             return true;
         };
-        const enterPiP = async () => {
-            // 腾讯视频的媒体实现无法由本脚本稳定控制，保留明确提示并交由原生播放器操作。
-            if (isTencentVideoHost()) {
+        const buildTencentFrameDocumentPiP = async () => {
+            const pipApi = window.documentPictureInPicture || unsafeWindow?.documentPictureInPicture;
+            if (!pipApi?.requestWindow) return false;
+            const iframeCandidates = new Set();
+            const collectIframes = (tree) => {
+                if (!tree?.querySelectorAll) return;
+                tree.querySelectorAll('iframe').forEach((frame) => iframeCandidates.add(frame));
+                tree.querySelectorAll('*').forEach((element) => {
+                    if (element.shadowRoot) collectIframes(element.shadowRoot);
+                });
+            };
+            collectIframes(document);
+            const playerCandidates = new Set([
+                ...document.querySelectorAll([
+                    '#mod_player',
+                    '#player-container',
+                    '.container-player',
+                    '.txp_player',
+                    '.txp-player',
+                    '[class*="txp-player"]',
+                    '[data-role="player"]'
+                ].join(',')),
+                ...iframeCandidates
+            ]);
+            const surfaces = [...playerCandidates]
+                .map((element) => {
+                    const rect = element.getBoundingClientRect();
+                    const source = element instanceof HTMLIFrameElement ? (element.src || '') : '';
+                    const playerScore = element instanceof HTMLIFrameElement ? 0 : 2e12;
+                    const tencentScore = /(?:qq|gtimg)\.com/i.test(source) ? 1e12 : 0;
+                    return {
+                        element,
+                        rect,
+                        score: playerScore + tencentScore + rect.width * rect.height
+                    };
+                })
+                .filter(({rect}) => rect.width >= 240 && rect.height >= 135)
+                .sort((left, right) => right.score - left.score);
+            const selected = surfaces[0];
+            if (!selected) return false;
+
+            const width = Math.round(Math.min(960, Math.max(360, selected.rect.width)));
+            const ratio = selected.rect.width / Math.max(1, selected.rect.height);
+            const height = Math.round(Math.min(720, Math.max(203, width / ratio)));
+            const requestedWindow = await pipApi.requestWindow({width, height});
+            pipWindow = requestedWindow;
+            requestedWindow.document.title = 'v.qq.com';
+
+            const style = requestedWindow.document.createElement('style');
+            style.textContent = `
+                html, body {
+                    width: 100% !important;
+                    height: 100% !important;
+                    min-width: 0 !important;
+                    min-height: 0 !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    overflow: hidden !important;
+                    background: #000 !important;
+                }
+                #tc-tencent-pip-stage {
+                    position: fixed !important;
+                    inset: 0 !important;
+                    overflow: hidden !important;
+                    background: #000 !important;
+                }
+                #tc-tencent-pip-stage > * {
+                    position: absolute !important;
+                    inset: 0 !important;
+                    width: 100% !important;
+                    height: 100% !important;
+                    min-width: 0 !important;
+                    min-height: 0 !important;
+                    max-width: none !important;
+                    max-height: none !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    border: 0 !important;
+                    transform: none !important;
+                }
+            `;
+            requestedWindow.document.head.appendChild(style);
+            const stage = requestedWindow.document.createElement('main');
+            stage.id = 'tc-tencent-pip-stage';
+            requestedWindow.document.body.appendChild(stage);
+
+            pipPlaceholder = document.createComment('tc-tencent-player-placeholder');
+            pipMovedElement = selected.element;
+            pipOriginalStyle = selected.element.getAttribute('style');
+            selected.element.replaceWith(pipPlaceholder);
+            stage.appendChild(selected.element);
+
+            requestedWindow.addEventListener('pagehide', () => {
+                restoreDocumentPiPElements();
+                pipWindow = null;
                 updatePiPToggle(false);
-                setStatus(root, '脚本受限，请点击播放器中的画中画按钮！');
-                root.classList.add('tc-open');
-                return false;
-            }
+            }, {once: true});
+            updatePiPToggle(true);
+            return true;
+        };
+        const enterPiP = async (automatic = false) => {
             if (pipWindow || pipVideo?.ownerDocument?.pictureInPictureElement) {
-                await closeManagedPiP();
+                if (!automatic) await closeManagedPiP();
                 return true;
             }
             const video = getBestPiPVideo();
             if (!video) {
-                broadcastFramePiP('toggle');
-                updatePiPToggle(false, '正在请求跨域播放器开启画中画');
-                setStatus(root, '正在请求跨域播放器开启画中画');
+                broadcastFramePiP(automatic ? 'enter' : 'toggle');
+                updatePiPToggle(true, '已向跨域播放器请求画中画');
+                if (!automatic) {
+                    setStatus(
+                        root,
+                        isTencentVideoHost()
+                            ? '未识别到腾讯播放器区域，请刷新页面后重试'
+                            : '正在请求跨域播放器开启画中画'
+                    );
+                }
                 return true;
             }
             pipVideo = video;
             try {
                 video.disablePictureInPicture = false;
                 video.removeAttribute('disablepictureinpicture');
+                if (automatic) {
+                    try {
+                        video.autoPictureInPicture = true;
+                        video.setAttribute('autopictureinpicture', '');
+                    } catch (error) {}
+                }
                 if (!video.requestPictureInPicture) {
                     throw new Error('当前浏览器不支持原生画中画');
                 }
                 await video.requestPictureInPicture();
+                automaticPiPActive = Boolean(automatic);
                 video.addEventListener('leavepictureinpicture', () => {
                     clearMediaSessionPiPActions();
+                    automaticPiPActive = false;
                     pipVideo = null;
                     updatePiPToggle(false);
                     refreshVideoSurface(video);
@@ -3289,13 +3190,32 @@
             } catch (error) {
                 pipVideo = null;
                 updatePiPToggle(false);
-                setStatus(root, error?.message || '画中画开启失败，请先点击页面中的视频再重试');
-                root.classList.add('tc-open');
+                if (!automatic) {
+                    setStatus(root, error?.message || '画中画开启失败，请先点击页面中的视频再重试');
+                    root.classList.add('tc-open');
+                }
                 return false;
             }
         };
+        const syncAutoPiPMediaSessionAction = () => {
+            if (!navigator.mediaSession) return;
+            try {
+                navigator.mediaSession.setActionHandler(
+                    'enterpictureinpicture',
+                    runtimeSettings.autoPiP ? () => enterPiP(true) : null
+                );
+            } catch (error) {
+                // 当前浏览器尚未开放自动画中画 Media Session 动作。
+            }
+        };
+        syncAutoPiPMediaSessionAction();
+        ['play', 'playing'].forEach((eventName) => {
+            document.addEventListener(eventName, () => {
+                window.setTimeout(syncAutoPiPMediaSessionAction, 0);
+            }, true);
+        });
         const setRateOnVideo = (video) => {
-            if (!isPlaybackControlSupportedHere() || !playbackControllerEnabled) return false;
+            if (!playbackControllerEnabled) return false;
             return forceVideoPlaybackRate(video, currentPlaybackRate);
         };
         const attachVideoRateGuard = (video) => {
@@ -3315,28 +3235,27 @@
                 video.addEventListener(eventName, restoreRate);
             });
         };
-        function syncVideoPlaybackRates(roots = null) {
-            // 腾讯页面只展示原生播放器操作提示，不扫描、不绑定，也不写入媒体倍速。
+        function syncVideoPlaybackRates() {
             if (!isPlaybackControlSupportedHere()) {
-                const message = '腾讯视频请使用播放器自带的倍速按钮';
-                if (speedMeta.textContent !== message) speedMeta.textContent = message;
+                const rateLabel = formatPlaybackRate(currentPlaybackRate);
+                speedMeta.textContent = `腾讯播放器暂不支持脚本倍速 · 已记住 ${rateLabel}×`;
                 return 0;
             }
+            ensureTencentPlaybackGuard(currentPlaybackRate, playbackControllerEnabled);
             if (!playbackControllerEnabled) {
                 broadcastPlaybackControllerState();
                 return 0;
             }
-            const videos = collectPageVideos(roots);
+            const videos = collectPageVideos();
             let appliedCount = 0;
             videos.forEach((video) => {
                 attachVideoRateGuard(video);
                 if (setRateOnVideo(video)) appliedCount += 1;
             });
             const rateLabel = formatPlaybackRate(currentPlaybackRate);
-            const message = appliedCount
+            speedMeta.textContent = appliedCount
                 ? `已应用 ${rateLabel}× · 检测到 ${appliedCount} 个视频`
                 : `已记住 ${rateLabel}× · 暂未检测到可控制的视频`;
-            if (speedMeta.textContent !== message) speedMeta.textContent = message;
             broadcastPlaybackControllerState();
             return appliedCount;
         }
@@ -3354,11 +3273,6 @@
             });
         };
         const applyPlaybackRate = (value) => {
-            if (!isPlaybackControlSupportedHere()) {
-                setStatus(root, '脚本受限，请点击播放器的倍速按钮！');
-                root.classList.add('tc-open');
-                return false;
-            }
             const parsed = Number(value);
             if (!Number.isFinite(parsed) || parsed <= 0) {
                 speedMeta.textContent = `请输入 ${MIN_PLAYBACK_RATE}–${MAX_PLAYBACK_RATE} 之间的有效倍速`;
@@ -3370,23 +3284,19 @@
                 Math.min(MAX_PLAYBACK_RATE, Math.max(MIN_PLAYBACK_RATE, parsed)).toFixed(2)
             );
             saveSettingPatch({playbackRate: currentPlaybackRate});
+            ensureTencentPlaybackGuard(currentPlaybackRate, playbackControllerEnabled);
             updateSpeedControls();
             syncVideoPlaybackRates();
             return true;
         };
-        const scheduleVideoScan = (roots = null) => {
+        const scheduleVideoScan = () => {
             if (!playbackControllerEnabled) return;
-            roots?.forEach((root) => pendingVideoRoots.add(root));
             clearTimeout(speedScanTimer);
-            speedScanTimer = window.setTimeout(() => {
-                const queuedRoots = [...pendingVideoRoots];
-                pendingVideoRoots.clear();
-                syncVideoPlaybackRates(queuedRoots.length ? queuedRoots : null);
-            }, 160);
+            speedScanTimer = window.setTimeout(syncVideoPlaybackRates, 160);
         };
         const applyLauncherPosition = (position = runtimeSettings.launcherPosition) => {
-            const maxX = Math.max(0, window.innerWidth - launcherWidth);
-            const maxY = Math.max(0, window.innerHeight - launcherHeight);
+            const maxX = Math.max(0, window.innerWidth - launcherWrap.offsetWidth);
+            const maxY = Math.max(0, window.innerHeight - launcherWrap.offsetHeight);
             const restoredPoint = position
                 ? {x: position.x * maxX, y: position.y * maxY}
                 : {x: Math.min(12, maxX), y: maxY / 2};
@@ -3399,8 +3309,8 @@
             positionPanel();
         };
         const saveLauncherPosition = () => {
-            const maxX = Math.max(1, window.innerWidth - launcherWidth);
-            const maxY = Math.max(1, window.innerHeight - launcherHeight);
+            const maxX = Math.max(1, window.innerWidth - launcherWrap.offsetWidth);
+            const maxY = Math.max(1, window.innerHeight - launcherWrap.offsetHeight);
             saveSettingPatch({
                 launcherPosition: {
                     x: launcherPoint.x / maxX,
@@ -3410,9 +3320,9 @@
         };
         const snapLauncherToEdge = () => {
             if (!runtimeSettings.edgeSnap) return;
-            launcherPoint.x = launcherPoint.x + launcherWidth / 2 < window.innerWidth / 2
+            launcherPoint.x = launcherPoint.x + launcherWrap.offsetWidth / 2 < window.innerWidth / 2
                 ? 8
-                : window.innerWidth - launcherWidth - 8;
+                : window.innerWidth - launcherWrap.offsetWidth - 8;
             launcherWrap.style.left = `${Math.round(launcherPoint.x)}px`;
             saveLauncherPosition();
             positionPanel();
@@ -3521,6 +3431,7 @@
             root.classList.remove('tc-speed-modal');
             root.classList.remove('tc-open');
             root.classList.add('tc-suspended');
+            ensureTencentPlaybackGuard(currentPlaybackRate, false);
             broadcastPlaybackControllerState();
         };
         launcher.addEventListener('click', () => {
@@ -3538,43 +3449,29 @@
             if (event.button !== 0) return;
             const start = {x: event.clientX, y: event.clientY, left: launcherPoint.x, top: launcherPoint.y};
             let moved = false;
-            let dragFrame = 0;
-            let pendingPoint = null;
             launcher.setPointerCapture(event.pointerId);
             launcher.classList.add('tc-dragging');
             launcherWrap.classList.remove('tc-dimmed');
             clearTimeout(dimTimer);
 
-            const renderDragFrame = () => {
-                dragFrame = 0;
-                if (!pendingPoint) return;
-                const {dx, dy} = pendingPoint;
-                pendingPoint = null;
+            const move = (moveEvent) => {
+                const dx = moveEvent.clientX - start.x;
+                const dy = moveEvent.clientY - start.y;
+                if (Math.hypot(dx, dy) > 4) moved = true;
+                if (!moved) return;
                 launcherPoint.x = Math.min(
-                    window.innerWidth - launcherWidth - 4,
+                    window.innerWidth - launcherWrap.offsetWidth - 4,
                     Math.max(4, start.left + dx)
                 );
                 launcherPoint.y = Math.min(
-                    window.innerHeight - launcherHeight - 4,
+                    window.innerHeight - launcherWrap.offsetHeight - 4,
                     Math.max(4, start.top + dy)
                 );
                 launcherWrap.style.left = `${Math.round(launcherPoint.x)}px`;
                 launcherWrap.style.top = `${Math.round(launcherPoint.y)}px`;
                 positionPanel();
             };
-            const move = (moveEvent) => {
-                const dx = moveEvent.clientX - start.x;
-                const dy = moveEvent.clientY - start.y;
-                if (Math.hypot(dx, dy) > 4) moved = true;
-                if (!moved) return;
-                pendingPoint = {dx, dy};
-                if (!dragFrame) dragFrame = requestAnimationFrame(renderDragFrame);
-            };
             const end = () => {
-                if (dragFrame) {
-                    cancelAnimationFrame(dragFrame);
-                    renderDragFrame();
-                }
                 launcher.removeEventListener('pointermove', move);
                 launcher.removeEventListener('pointerup', end);
                 launcher.removeEventListener('pointercancel', end);
@@ -3601,7 +3498,7 @@
             event.stopPropagation();
             suspendPageAssistant();
         });
-        pipToggle.addEventListener('click', () => enterPiP());
+        pipToggle.addEventListener('click', () => enterPiP(false));
         window.addEventListener('message', (event) => {
             const message = event.data;
             if (
@@ -3611,13 +3508,7 @@
                 || message?.action !== 'state'
             ) return;
             updatePiPToggle(Boolean(message.active));
-            if (message.error) {
-                const errorLabel = message.errorName
-                    ? `${message.errorName}: ${message.error}`
-                    : message.error;
-                setStatus(root, errorLabel);
-                root.classList.add('tc-open');
-            }
+            if (message.error) setStatus(root, message.error);
         });
         ['pointerdown', 'input', 'change', 'keydown', 'wheel'].forEach((eventName) => {
             panel.addEventListener(eventName, scheduleDim, eventName === 'wheel' ? {passive: true} : false);
@@ -3636,16 +3527,7 @@
                 }
             }, 0);
         });
-        window.addEventListener('resize', () => {
-            if (resizeFrame) return;
-            resizeFrame = requestAnimationFrame(() => {
-                resizeFrame = 0;
-                // 响应式样式可能改变按钮尺寸，窗口变化后统一刷新一次缓存。
-                launcherWidth = launcherWrap.offsetWidth || 48;
-                launcherHeight = launcherWrap.offsetHeight || 48;
-                applyLauncherPosition(runtimeSettings.launcherPosition);
-            });
-        });
+        window.addEventListener('resize', () => applyLauncherPosition(runtimeSettings.launcherPosition));
         root.querySelector('.tc-close').addEventListener('click', () => setOpen(false));
         new MutationObserver(() => {
             if (root.classList.contains('tc-open')) {
@@ -3670,13 +3552,6 @@
             scheduleDim();
         };
         speedToggle.addEventListener('click', () => {
-            // 腾讯视频不打开脚本倍速面板，避免让用户误以为设置已作用于播放器。
-            if (isTencentVideoHost()) {
-                closeSpeedModal();
-                setStatus(root, '脚本受限，请点击播放器的倍速按钮！');
-                root.classList.add('tc-open');
-                return;
-            }
             clearTimeout(speedAutoCloseTimer);
             speedAutoCloseTimer = 0;
             updateSpeedControls();
@@ -3750,8 +3625,6 @@
             }
         })();
         let sleepTickTimer = 0;
-        let sleepSmartRefreshTimer = 0;
-        let sleepStatusClearTimer = 0;
         // 数值框展示所选单位，内部始终以秒保存，切换单位不会改变实际时长。
         const syncSleepDurationFields = () => {
             if (!sleepValueInput || !sleepUnitSelect) return;
@@ -3777,12 +3650,11 @@
             saveSettingPatch({
                 sleepDurationSeconds: configuredSleepDurationSeconds,
                 sleepDurationUnit: configuredSleepUnit,
-                // 手动值只在当前页面锁定，刷新后仍应优先采用视频剩余时间。
-                sleepDurationCustomized: false
+                sleepDurationCustomized
             });
         };
         const chooseSleepDurationUnit = (seconds) => {
-            if (seconds < 60) return 'seconds';
+            if (seconds < 300) return 'seconds';
             if (seconds < 7200) return 'minutes';
             return 'hours';
         };
@@ -3831,22 +3703,6 @@
             }
             return remaining;
         };
-        /**
-         * 更新定时器状态提示，并可在指定时间后仅清除同一条提示。
-         * @param {string} message 要显示的定时器状态。
-         * @param {number} clearAfterMs 自动清除延迟；0 表示持续显示。
-         */
-        const setSleepStatus = (message, clearAfterMs = 0) => {
-            clearTimeout(sleepStatusClearTimer);
-            sleepStatusClearTimer = 0;
-            setStatus(root, message);
-            if (!message || clearAfterMs <= 0) return;
-            sleepStatusClearTimer = window.setTimeout(() => {
-                sleepStatusClearTimer = 0;
-                const status = root.querySelector('.tc-status');
-                if (status?.textContent === message) setStatus(root, '');
-            }, clearAfterMs);
-        };
         const stopPlaybackForSleepTimer = () => {
             pauseMediaForSleepTimer();
             relaySleepStopToFrames();
@@ -3860,15 +3716,13 @@
             sleepDeadline = 0;
             persistSleepDeadline();
             renderSleepTimer();
-            const status = root.querySelector('.tc-status');
-            if (status?.textContent === SLEEP_COUNTDOWN_STATUS) setSleepStatus('');
         };
         const finishSleepTimer = () => {
             cancelSleepTimer();
             stopPlaybackForSleepTimer();
             setTimeout(stopPlaybackForSleepTimer, 700);
             setTimeout(stopPlaybackForSleepTimer, 1800);
-            setSleepStatus(SLEEP_FINISHED_STATUS, SLEEP_FINISHED_STATUS_MS);
+            setStatus(root, '定时结束，已暂停当前页面播放');
         };
         const tickSleepTimer = () => {
             if (renderSleepTimer() <= 0) finishSleepTimer();
@@ -3881,7 +3735,6 @@
             sleepDeadline = Date.now() + configuredSleepDurationSeconds * 1000;
             persistSleepDeadline();
             renderSleepTimer();
-            setSleepStatus(SLEEP_COUNTDOWN_STATUS);
             sleepTickTimer = window.setInterval(tickSleepTimer, 1000);
         };
         sleepValueInput?.addEventListener('input', () => {
@@ -3914,24 +3767,19 @@
         setTimeout(applyCurrentMediaRemainingDefault, 3000);
         setTimeout(applyCurrentMediaRemainingDefault, 8000);
         document.addEventListener('loadedmetadata', applyCurrentMediaRemainingDefault, true);
-        sleepSmartRefreshTimer = window.setInterval(applyCurrentMediaRemainingDefault, 1000);
         if (sleepDeadline > Date.now()) {
             renderSleepTimer();
-            setSleepStatus(SLEEP_COUNTDOWN_STATUS);
             sleepTickTimer = window.setInterval(tickSleepTimer, 1000);
         } else if (sleepDeadline > 0) {
             finishSleepTimer();
         } else {
             renderSleepTimer();
         }
-        window.addEventListener('pagehide', () => {
-            clearInterval(sleepTickTimer);
-            clearInterval(sleepSmartRefreshTimer);
-            clearTimeout(sleepStatusClearTimer);
-        }, {once: true});
+        window.addEventListener('pagehide', () => clearInterval(sleepTickTimer), {once: true});
 
         const fadeSecondsInput = root.querySelector('[data-setting="fade-seconds"]');
         const edgeSnapInput = root.querySelector('[data-setting="edge-snap"]');
+        const autoPiPInput = root.querySelector('[data-setting="auto-pip"]');
         const caterpillarStyleInput = root.querySelector('[data-setting="caterpillar-style"]');
         caterpillarStyleInput?.addEventListener('change', () => {
             const caterpillarStyle = ['A', 'B', 'C'].includes(caterpillarStyleInput.value)
@@ -3949,10 +3797,16 @@
         edgeSnapInput?.addEventListener('change', () => {
             saveSettingPatch({edgeSnap: edgeSnapInput.checked});
         });
+        autoPiPInput?.addEventListener('change', () => {
+            saveSettingPatch({autoPiP: autoPiPInput.checked});
+            syncAutoPiPMediaSessionAction();
+        });
         if (typeof GM_addValueChangeListener === 'function') {
             GM_addValueChangeListener(SETTINGS_KEY, () => {
                 const synced = getSettings();
                 runtimeSettings = {...runtimeSettings, ...synced};
+                if (autoPiPInput) autoPiPInput.checked = synced.autoPiP;
+                syncAutoPiPMediaSessionAction();
             });
         }
         const numberInput = root.querySelector('#tc-index-number');
@@ -4022,14 +3876,76 @@
             }
         });
         if (isPlaybackControlSupportedHere()) {
+            new MutationObserver((records) => {
+                const hasNewMedia = records.some((record) => [...record.addedNodes].some((node) => (
+                    node.nodeType === Node.ELEMENT_NODE
+                    && (
+                        node.matches?.('video, iframe')
+                        || node.querySelector?.('video, iframe')
+                    )
+                )));
+                if (hasNewMedia) scheduleVideoScan();
+            }).observe(document.documentElement, {childList: true, subtree: true});
             window.setInterval(() => {
                 if (!document.hidden) syncVideoPlaybackRates();
             }, getPlaybackGuardInterval());
         }
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && isPlaybackControlSupportedHere()) {
-                syncVideoPlaybackRates();
+        let autoPiPTimer = 0;
+        let returnFocusTimer = 0;
+        const requestAutomaticPiP = () => {
+            if (!runtimeSettings.autoPiP) return;
+            const video = getBestPiPVideo();
+            if (video && !video.paused) {
+                enterPiP(true);
+            } else {
+                broadcastFramePiP('enter');
             }
+        };
+        const returnToPlaybackPage = () => {
+            clearTimeout(autoPiPTimer);
+            clearTimeout(returnFocusTimer);
+            autoPiPTimer = 0;
+            returnFocusTimer = 0;
+            if (isPlaybackControlSupportedHere()) syncVideoPlaybackRates();
+            if (
+                automaticPiPActive
+                && pipVideo?.ownerDocument?.pictureInPictureElement === pipVideo
+            ) {
+                clearTimeout(automaticPiPRestoreTimer);
+                automaticPiPRestoreTimer = window.setTimeout(() => {
+                    automaticPiPRestoreTimer = 0;
+                    if (pipVideo?.ownerDocument?.pictureInPictureElement === pipVideo) {
+                        closeManagedPiP();
+                    }
+                }, 550);
+                return;
+            }
+            closeManagedPiP();
+        };
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) returnToPlaybackPage();
+            else {
+                clearTimeout(returnFocusTimer);
+                returnFocusTimer = 0;
+                requestAutomaticPiP();
+            }
+        });
+        window.addEventListener('blur', () => {
+            if (!runtimeSettings.autoPiP) return;
+            clearTimeout(returnFocusTimer);
+            returnFocusTimer = 0;
+            clearTimeout(autoPiPTimer);
+            autoPiPTimer = window.setTimeout(() => {
+                autoPiPTimer = 0;
+                if (!document.hasFocus()) requestAutomaticPiP();
+            }, 280);
+        });
+        window.addEventListener('focus', () => {
+            clearTimeout(returnFocusTimer);
+            returnFocusTimer = window.setTimeout(() => {
+                returnFocusTimer = 0;
+                if (!document.hidden && document.hasFocus()) returnToPlaybackPage();
+            }, 220);
         });
         return root;
     }
@@ -4189,16 +4105,6 @@
         const routeSettings = root.querySelector('.tc-route-settings');
         const gearButton = root.querySelector('.tc-gear');
         const subtitle = root.querySelector('.tc-subtitle');
-        const buildMediaRefreshProbe = () => {
-            const platform = getPlatformInfo();
-            return [
-                location.href,
-                document.title,
-                firstText(platform?.titleSelectors),
-                firstText(platform?.episodeSelectors),
-                metaContent('meta[property="og:title"]', 'meta[name="title"]')
-            ].join('|');
-        };
 
         function showSettingsView() {
             root.classList.add('tc-open');
@@ -4428,19 +4334,8 @@
             mediaInfo.releaseYear,
             mediaInfo.sourceUrl
         ].join('|');
-        let lastMediaProbe = buildMediaRefreshProbe();
-        let lastMediaFullCheck = Date.now();
-        const refreshMediaInfo = (force = false) => {
+        const refreshMediaInfo = () => {
             if (manualMode || document.hidden) return;
-            const nextProbe = buildMediaRefreshProbe();
-            // 探针未变化时只做轻量查询；每 10 秒仍完整兜底一次，覆盖非标准动态页面。
-            if (
-                !force
-                && nextProbe === lastMediaProbe
-                && Date.now() - lastMediaFullCheck < 10000
-            ) return;
-            lastMediaProbe = nextProbe;
-            lastMediaFullCheck = Date.now();
             const nextMediaInfo = extractMediaInfo();
             const nextFingerprint = [
                 nextMediaInfo.title,
@@ -4457,19 +4352,19 @@
             updateMeta();
         };
         setInterval(refreshMediaInfo, MEDIA_INFO_REFRESH_MS);
-        window.addEventListener('popstate', () => refreshMediaInfo(true));
-        window.addEventListener('hashchange', () => refreshMediaInfo(true));
-        window.addEventListener('pageshow', () => refreshMediaInfo(true));
+        window.addEventListener('popstate', refreshMediaInfo);
+        window.addEventListener('hashchange', refreshMediaInfo);
+        window.addEventListener('pageshow', refreshMediaInfo);
         const titleNode = document.querySelector('title');
         if (titleNode) {
-            new MutationObserver(() => refreshMediaInfo(true)).observe(titleNode, {
+            new MutationObserver(refreshMediaInfo).observe(titleNode, {
                 childList: true,
                 characterData: true,
                 subtree: true
             });
         }
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) refreshMediaInfo(true);
+            if (!document.hidden) refreshMediaInfo();
         });
     }
 
@@ -4506,10 +4401,10 @@
         const wantedVariant = pending?.episodeVariant || '正片';
         let best = null;
 
-        for (const link of root.querySelectorAll('a[href*="/play/"]')) {
+        [...root.querySelectorAll('a[href*="/play/"]')].forEach((link) => {
             const descriptor = getEpisodeDescriptorFromLink(link);
-            if (descriptor.number !== episodeNumber) continue;
-            if (wantedVariant && descriptor.variant !== wantedVariant) continue;
+            if (descriptor.number !== episodeNumber) return;
+            if (wantedVariant && descriptor.variant !== wantedVariant) return;
 
             let score = 100;
             if (wantedDate) {
@@ -4523,135 +4418,8 @@
             if (descriptor.variant === '正片') score += 20;
 
             if (!best || score > best.score) best = {link, score, descriptor};
-        }
+        });
         return best?.link || null;
-    }
-
-    /**
-     * 判断目标站播放器控件是否真实可见，避免对隐藏模板执行点击。
-     */
-    function isVisibleTargetControl(element) {
-        if (!element?.isConnected || element.closest?.(`#${APP_ID}`)) return false;
-        const style = getComputedStyle(element);
-        if (
-            style.display === 'none'
-            || style.visibility === 'hidden'
-            || Number(style.opacity) === 0
-        ) return false;
-        const rect = element.getBoundingClientRect();
-        return rect.width > 2
-            && rect.height > 2
-            && rect.bottom > 0
-            && rect.right > 0
-            && rect.top < window.innerHeight
-            && rect.left < window.innerWidth;
-    }
-
-    /**
-     * 在目标站播放器中寻找文字为“选集”的可见切换控件。
-     */
-    function findTargetEpisodeToggle() {
-        let best = null;
-        const candidates = document.querySelectorAll([
-            'button',
-            '[role="button"]',
-            'a',
-            'span',
-            '[class*="control" i]',
-            '[class*="episode" i]',
-            '[class*="select" i]'
-        ].join(','));
-        for (const element of candidates) {
-            if (cleanText(element.textContent) !== '选集' || !isVisibleTargetControl(element)) {
-                continue;
-            }
-            const rect = element.getBoundingClientRect();
-            const className = String(element.className || '');
-            let score = 1;
-            if (element.matches('button, [role="button"]')) score += 40;
-            if (/player|video|control|episode/i.test(className)) score += 30;
-            if (rect.top > window.innerHeight * 0.4) score += 12;
-            if (rect.width <= 180 && rect.height <= 100) score += 8;
-            if (!best || score > best.score) best = {element, score};
-        }
-        return best?.element || null;
-    }
-
-    /**
-     * 仅凭明确的展开状态或多个可见集数判断选集面板已打开，防止误触后反向展开。
-     */
-    function isTargetEpisodePanelOpen(toggle) {
-        if (!toggle) return false;
-        if (toggle.getAttribute('aria-expanded') === 'true') return true;
-        if (/(?:^|\s)(?:active|open|opened|expanded)(?:\s|$)/i.test(String(toggle.className || ''))) {
-            return true;
-        }
-        const visibleChooserFrame = [...document.querySelectorAll(
-            'iframe[src*="choseEpisodes" i], iframe[src*="chooseEpisodes" i]'
-        )].some((frame) => isVisibleTargetControl(frame));
-        if (visibleChooserFrame) return true;
-
-        const positions = new Set();
-        const choices = document.querySelectorAll([
-            'a[href*="/play/"]',
-            'button',
-            '[role="button"]',
-            '.episode-ctn',
-            '[class*="episode-item" i]',
-            '[class*="episode_item" i]'
-        ].join(','));
-        for (const choice of choices) {
-            const label = cleanText(
-                choice.querySelector?.('.episode-ctn')?.getAttribute('title')
-                || choice.getAttribute?.('title')
-                || choice.textContent
-            );
-            if (
-                !/^(?:第\s*)?0*\d{1,4}(?:\s*[集期话部])?$/.test(label)
-                || !isVisibleTargetControl(choice)
-            ) continue;
-            const rect = choice.getBoundingClientRect();
-            positions.add(`${Math.round(rect.left)}:${Math.round(rect.top)}`);
-            if (positions.size >= 2) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 自动定位完成后收起目标站默认展开的选集面板；普通访问和手动操作不介入。
-     */
-    function closeTargetEpisodePanelAfterAutoNavigation(pending, root) {
-        if (
-            !location.pathname.startsWith('/play/')
-            || pending?.stage !== 'complete'
-            || !pending.completedAt
-            || Date.now() - Number(pending.completedAt) > 2 * 60 * 1000
-        ) return;
-
-        const closeMarker = `${APP_ID}:episode-panel-closed:${pending.completedAt}`;
-        try {
-            if (sessionStorage.getItem(closeMarker)) return;
-        } catch (error) {
-            // 禁用会话存储时仍允许本轮一次性检测，不影响自动定位主流程。
-        }
-
-        let attempts = 0;
-        const attemptClose = () => {
-            attempts += 1;
-            const toggle = findTargetEpisodeToggle();
-            if (toggle && isTargetEpisodePanelOpen(toggle)) {
-                clearInterval(timer);
-                toggle.click();
-                try {
-                    sessionStorage.setItem(closeMarker, '1');
-                } catch (error) {}
-                setStatus(root, `已定位并播放：${pending.title}`);
-                return;
-            }
-            if (attempts >= 32) clearInterval(timer);
-        };
-        const timer = window.setInterval(attemptClose, 250);
-        attemptClose();
     }
 
     function getTargetResultInfo(link) {
@@ -4678,31 +4446,33 @@
 
     function selectExactTargetTitleLink(pending) {
         const wantedTitle = normalizeMatchText(pending?.title);
-        let best = null;
-        for (const link of document.querySelectorAll('a.result-nav-link')) {
-            if (
-                normalizeMatchText(link.textContent) !== wantedTitle
-                || !/\/play\//.test(link.href)
-            ) continue;
-            const info = getTargetResultInfo(link);
-            let score = 100;
-            if (pending.mediaType) {
-                if (info.mediaType === pending.mediaType) score += 260;
-                else if (info.mediaType) score -= 260;
-            }
-            if (pending.mediaType === 'movie') {
-                score += info.episodeCount > 1 ? -320 : 100;
-            } else if (pending.mediaType && info.episodeCount > 0) {
-                score += 40;
-            }
-            if (pending.releaseYear) {
-                if (info.releaseYear === pending.releaseYear) score += 140;
-                else if (info.releaseYear) score -= 80;
-            }
-            if (!best || score > best.score) best = {link, info, score};
-        }
+        const candidates = [...document.querySelectorAll('a.result-nav-link')]
+            .filter((link) => (
+                normalizeMatchText(link.textContent) === wantedTitle
+                && /\/play\//.test(link.href)
+            ))
+            .map((link) => {
+                const info = getTargetResultInfo(link);
+                let score = 100;
+                if (pending.mediaType) {
+                    if (info.mediaType === pending.mediaType) score += 260;
+                    else if (info.mediaType) score -= 260;
+                }
+                if (pending.mediaType === 'movie') {
+                    score += info.episodeCount > 1 ? -320 : 100;
+                } else if (pending.mediaType && info.episodeCount > 0) {
+                    score += 40;
+                }
+                if (pending.releaseYear) {
+                    if (info.releaseYear === pending.releaseYear) score += 140;
+                    else if (info.releaseYear) score -= 80;
+                }
+                return {link, info, score};
+            })
+            .sort((left, right) => right.score - left.score);
 
-        if (!best) return null;
+        if (!candidates.length) return null;
+        const best = candidates[0];
         const incompatibleMovie = pending.mediaType === 'movie'
             && (best.info.episodeCount > 1 || (best.info.mediaType && best.info.mediaType !== 'movie'));
         const incompatibleType = pending.mediaType
@@ -4920,9 +4690,11 @@
         });
 
         if (query) root.classList.add('tc-open');
-        closeTargetEpisodePanelAfterAutoNavigation(pending, root);
         autoOpenExactTarget(pending, root);
     }
+
+    installTencentMainWorldBridge();
+    ensureTencentPlaybackGuard(getSettings().playbackRate, true);
 
     const startPageAssistant = () => {
         if (window.top !== window.self) {
