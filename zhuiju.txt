@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         天虫
 // @namespace    https://github.com/local/tianchong-video-navigator
-// @version      2.0.6
-// @description  从主流视频页面提取片名与集数，辅助在目标站搜索，并提供通用视频倍速与画中画控制。
+// @version      2.0.8
+// @description  从主流视频页面提取片名与集数，辅助在目标站搜索，提供视频倍速、画中画、定时暂停与网页分页跳转。
 // @author       jtl66
 // @match        *://*/*
 // @match        https://v.qq.com/*
@@ -26,7 +26,7 @@
     'use strict';
 
     const APP_ID = 'tc-video-helper';
-    const TARGET_HOST = 'www.iyf.tv';
+    const TARGET_HOST = 'www.kubb.tv';
     const TARGET_HOME = `https://${TARGET_HOST}/`;
     const PENDING_KEY = 'tc_pending_search';
     const SETTINGS_KEY = 'tc_helper_settings';
@@ -43,7 +43,7 @@
     const SLEEP_FINISHED_STATUS = '定时结束，已暂停当前页面播放';
     const SLEEP_FINISHED_STATUS_MS = 5000;
     const MAX_TITLE_LENGTH = 100;
-    const SCRIPT_VERSION = '2.0.6';
+    const SCRIPT_VERSION = '2.0.8';
     const DEFAULT_FADE_SECONDS = 10;
     const SPEED_AUTO_CLOSE_MS = 1500;
     const MAX_PANEL_OPEN_MS = 10000;
@@ -61,6 +61,16 @@
     const MIN_PIP_HEIGHT = 135;
     // 顶层页面才需要完整界面和平台识别配置；iframe 只运行媒体控制器。
     const IS_TOP_LEVEL = window.top === window.self;
+    const PAGINATION_SELECTOR = [
+        '.pagination', '.pager', '.pages', '.pagenavi', '.wp-pagenavi',
+        '.page-numbers', '.pagebar', '.pagelist', '.pg',
+        '.el-pagination', '.ant-pagination', '.layui-laypage',
+        '.b_pag', '.s-pagination', '#page', '#navcnt', '#botstuff',
+        '[class*="pagination" i]', '[id*="pagination" i]',
+        'nav[aria-label*="page" i]', '[aria-label*="分页"]', '[aria-label*="分頁"]',
+        'nav[aria-label*="navigation" i]', '[role="navigation"]'
+    ].join(',');
+    const PAGE_PARAMETER = /^(?:page|p|pg|pageno|page_no|pageNum|page_num|pageNumber|pageIndex|page_index|currentPage)$/i;
 
     /**
      * 将任意输入限制为 1 秒至 24 小时的整数秒。
@@ -570,6 +580,12 @@
             background: rgba(108,99,255,.66);
         }
         #${APP_ID} .tc-body { padding: 10px 11px 11px; }
+        #${APP_ID} .tc-page-jump { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--tc-line); }
+        #${APP_ID} .tc-page-jump .tc-row { align-items: center; }
+        #${APP_ID} .tc-page-jump .tc-page-number { width: 0; min-width: 0; flex: 1; }
+        #${APP_ID} .tc-page-jump .tc-btn { flex: 0 0 auto; white-space: nowrap; }
+        #${APP_ID} .tc-page-hint { margin-top: 5px; color: var(--tc-muted); font-size: 11px; overflow-wrap: anywhere; }
+        #${APP_ID} .tc-page-region { width: 100%; margin-bottom: 5px; }
         #${APP_ID} [hidden] { display: none !important; }
         #${APP_ID} .tc-label {
             display: block;
@@ -1973,6 +1989,319 @@
         });
     }
 
+    /** 从页码控件的文字或无障碍标签读取正整数页码。 */
+    function readPaginationNumber(element) {
+        for (const value of [element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')]) {
+            const text = String(value || '').trim();
+            const match = text.match(/^(?:第\s*)?(\d+)\s*(?:页|頁)?$/)
+                || text.match(/^(?:go to\s+)?page\s+(\d+)$/i)
+                || text.match(/^(?:跳转|跳轉)到第?\s*(\d+)\s*[页頁]$/);
+            const number = match ? Number(match[1]) : 0;
+            if (Number.isSafeInteger(number) && number > 0) return number;
+        }
+        return null;
+    }
+
+    /** 排除助手自身、隐藏分页和禁用控件；页面底部的分页仍可识别。 */
+    function isPaginationElementVisible(element) {
+        if (element.closest(`#${APP_ID}, [hidden], [inert]`) || !element.getClientRects().length) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    /** 仅接受同源 HTTP(S) 页码链接，排除占位 href 和仅用于滚动的锚点。 */
+    function getPaginationLinkUrl(element, currentHref) {
+        const href = element.getAttribute('href') || element.getAttribute('data-href');
+        if (!href || /^(?:#(?:[^/?=&]*$)|javascript:)/i.test(href.trim())) return null;
+        try {
+            const url = new URL(href, currentHref);
+            const current = new URL(currentHref);
+            return /^https?:$/.test(url.protocol) && url.origin === current.origin ? url.href : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /** 去除已知搜索引擎的点击追踪参数，保留搜索词、过滤条件及排序。 */
+    function normalizePaginationUrl(url) {
+        const google = /(^|\.)google\.[a-z.]+$/i.test(url.hostname);
+        const bing = /(^|\.)bing\.com$/i.test(url.hostname);
+        for (const key of [...url.searchParams.keys()]) {
+            if ((google && /^(?:ved|ei|sxsrf|sstk)$/i.test(key))
+                || (bing && /^(?:form|cvid|fpig)$/i.test(key))) url.searchParams.delete(key);
+        }
+        return url;
+    }
+
+    /**
+     * 根据至少两个已标注页码的链接推导唯一数字位的变化规律。
+     * 保留搜索词、排序、帖子 ID 等其余地址部分，支持路径、查询、hash 和 offset 分页。
+     * @param {{page:number, url:string}[]} samples 当前分页区域的链接样本。
+     * @param {number} targetPage 用户输入的目标页码。
+     * @param {string} currentHref 当前页面地址，用于限制同源跳转。
+     * @returns {string|null} 有一致证据的目标地址；规则冲突时返回 null。
+     */
+    function inferPaginationUrl(samples, targetPage, currentHref) {
+        const groups = new Map();
+        for (const sample of samples) {
+            let url;
+            try { url = new URL(sample.url, currentHref); } catch (error) { continue; }
+            if (url.origin !== new URL(currentHref).origin || !/^https?:$/.test(url.protocol)) continue;
+            // 必应会在加载下一页时改变每页结果数，first 不能可靠换算成任意页码。
+            if (/(^|\.)bing\.com$/i.test(url.hostname) && url.searchParams.has('first')) continue;
+            const parts = normalizePaginationUrl(url).href.split(/(\d+)/);
+            const shape = JSON.stringify(parts.filter((_part, index) => index % 2 === 0));
+            if (!groups.has(shape)) groups.set(shape, []);
+            groups.get(shape).push({...sample, parts});
+        }
+        const destinations = new Set();
+        for (const group of groups.values()) {
+            const first = group[0];
+            const second = group.find((sample) => sample.page !== first.page);
+            if (!second) continue;
+            const changed = first.parts.map((part, index) => part !== second.parts[index] ? index : -1)
+                .filter((index) => index >= 0);
+            if (changed.length !== 1 || changed[0] % 2 !== 1) continue;
+            const slot = changed[0];
+            const step = (Number(second.parts[slot]) - Number(first.parts[slot])) / (second.page - first.page);
+            const offset = Number(first.parts[slot]) - step * first.page;
+            // 页码通常从 0/1 开始；偏移量通常为 (页码 - 1) × 每页条数。
+            const isOffset = /[?&#](?:start|offset|pn|first)=$/i.test(first.parts.slice(0, slot).join(''));
+            if (!Number.isSafeInteger(step) || step <= 0 || !Number.isSafeInteger(offset)
+                || (!isOffset && ![0, -step].includes(offset))) continue;
+            if (!group.every((sample) => sample.parts.every((part, index) => index === slot
+                ? Number(part) === step * sample.page + offset
+                : part === first.parts[index]))) continue;
+            const value = step * targetPage + offset;
+            if (!Number.isSafeInteger(value) || value < 0) continue;
+            const parts = [...first.parts];
+            const padded = group.every((sample) => /^0\d/.test(sample.parts[slot]));
+            parts[slot] = padded ? String(value).padStart(first.parts[slot].length, '0') : String(value);
+            destinations.add(parts.join(''));
+        }
+        return destinations.size === 1 ? [...destinations][0] : null;
+    }
+
+    /**
+     * 识别当前地址中的明确页码参数；只有一个候选且从 1 起计时才使用。
+     * offset/start 和从 0 开始的参数必须由分页链接提供证据，不直接猜测。
+     */
+    function getCurrentPageParameter(currentHref) {
+        const url = new URL(currentHref);
+        const matches = [...url.searchParams].filter(([key]) => PAGE_PARAMETER.test(key));
+        if (matches.length !== 1) return null;
+        const [key, value] = matches[0];
+        if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) return null;
+        return {key, page: Number(value)};
+    }
+
+    /** 利用同一组链接的规则反推当前页或末页，避免把最大可见页码误当作总页数。 */
+    function inferPaginationPage(samples, href, currentHref) {
+        if (!href) return null;
+        const first = inferPaginationUrl(samples, 1, currentHref);
+        const second = inferPaginationUrl(samples, 2, currentHref);
+        if (!first || !second) return null;
+        const parts = first.split(/(\d+)/);
+        const nextParts = second.split(/(\d+)/);
+        const target = normalizePaginationUrl(new URL(href, currentHref)).href.split(/(\d+)/);
+        const slot = parts.findIndex((part, index) => part !== nextParts[index]);
+        if (slot < 0 || target.length !== parts.length
+            || !parts.every((part, index) => index === slot || part === target[index])) return null;
+        const page = 1 + (Number(target[slot]) - Number(parts[slot])) / (Number(nextParts[slot]) - Number(parts[slot]));
+        return Number.isSafeInteger(page) && page >= 1 ? page : null;
+    }
+
+    /** 按需读取可见分页区域，收集页码控件、链接、原生跳页框及明确的总页数。 */
+    function collectPaginationRegions() {
+        const candidates = new Set(document.querySelectorAll(PAGINATION_SELECTOR));
+        // WordPress 的 page-numbers 可能直接标在链接上。
+        for (const element of [...candidates]) {
+            if (element.matches('a, button, span, input')) {
+                candidates.delete(element);
+                if (element.parentElement) candidates.add(element.parentElement);
+            }
+        }
+        document.querySelectorAll('a[rel~="next"], a[rel~="prev"]').forEach((link) => {
+            const parent = link.closest('nav, ul, div') || link.parentElement;
+            if (parent && parent !== document.body) candidates.add(parent);
+        });
+        // 无统一 class 的站点：只补充同时含“上一页/下一页”文字的紧凑导航区域。
+        document.querySelectorAll('a, button').forEach((element) => {
+            if (!/^(?:上一[页頁]|下一[页頁]|previous|next)(?:\s*[«»<>‹›])?$/i.test(element.textContent.trim())) return;
+            const parent = element.closest('nav, ul, ol') || element.parentElement;
+            if (parent && parent !== document.body && parent.querySelectorAll('a, button').length < 100) candidates.add(parent);
+        });
+        const visible = [...candidates].filter(isPaginationElementVisible);
+        const regions = [];
+        for (const container of visible.filter((element) => !visible.some((other) => other !== element && other.contains(element)))) {
+            const controls = [...container.querySelectorAll('a, button, [role="button"]')]
+                .filter(isPaginationElementVisible)
+                .map((element) => ({element, page: readPaginationNumber(element), url: getPaginationLinkUrl(element, location.href)}))
+                .filter((control) => control.page && (!control.element.matches('a[href]')
+                    || control.url || /^(?:#|javascript:)/i.test(control.element.getAttribute('href'))));
+            const jumpInput = [...container.querySelectorAll([
+                '.el-pagination__jump input', '.ant-pagination-options-quick-jumper input',
+                '.layui-laypage-skip input', 'input[type="number"]', 'input[inputmode="numeric"]'
+            ].join(','))].find((input) => isPaginationElementVisible(input) && !input.disabled
+                && !input.closest('[class*="sizes"], [class*="size-changer"]'));
+            const text = container.textContent;
+            const totalMatch = text.match(/共\s*([\d,]+)\s*[页頁]/);
+            let total = totalMatch ? Number(totalMatch[1].replace(/,/g, '')) : null;
+            const currentElement = container.querySelector('[aria-current="page"], .active, .current, .is-active, .selected, .sb_pagS, .ant-pagination-item-active, .layui-laypage-curr');
+            let current = currentElement ? readPaginationNumber(currentElement) : null;
+            const samples = controls.filter((control) => control.url);
+            // 首页可能只有 rel=next；仅当链接只新增明确的 page=2 类参数时确认首页。
+            if (!current) {
+                const nextLink = container.querySelector('a[rel~="next"]');
+                const nextHref = nextLink && getPaginationLinkUrl(nextLink, location.href);
+                const parameter = nextHref && getCurrentPageParameter(nextHref);
+                const currentParameter = getCurrentPageParameter(location.href);
+                if (parameter) {
+                    const nextBase = new URL(nextHref);
+                    const currentBase = new URL(location.href);
+                    nextBase.searchParams.delete(parameter.key);
+                    currentBase.searchParams.delete(parameter.key);
+                    if (nextBase.href === currentBase.href && ((parameter.page === 2 && !currentParameter)
+                        || (currentParameter?.key === parameter.key && parameter.page === currentParameter.page + 1))) {
+                        current = parameter.page - 1;
+                        const firstUrl = new URL(nextHref);
+                        firstUrl.searchParams.set(parameter.key, String(current));
+                        samples.push({page: current, url: firstUrl.href});
+                    }
+                }
+            }
+            // rel 导航与已标注的当前页一起提供证据，兼容只有前后页按钮的页面。
+            if (current) {
+                for (const link of container.querySelectorAll('a[rel~="next"], a[rel~="prev"]')) {
+                    const url = getPaginationLinkUrl(link, location.href);
+                    const page = current + (link.relList.contains('next') ? 1 : -1);
+                    if (url && page > 0) samples.push({page, url});
+                }
+                samples.push({page: current, url: location.href});
+            }
+            current = current || inferPaginationPage(samples, location.href, location.href);
+            const lastLink = [...container.querySelectorAll('a')].find((link) =>
+                link.relList.contains('last') || /^(?:最后|最後|末[页頁]|尾[页頁]|last(?: page)?)(?:\s*[»›>]+)?$/i.test(link.textContent.trim()));
+            total = total || inferPaginationPage(samples, lastLink && getPaginationLinkUrl(lastLink, location.href), location.href);
+            if (!controls.length && samples.length < 2 && !jumpInput) continue;
+            regions.push({container, controls, samples, jumpInput, current, total});
+        }
+        return regions;
+    }
+
+    /** 通过原生 value setter 和事件通知网页自身的分页组件处理用户输入。 */
+    function useNativePageJumper(region, page) {
+        const input = region.jumpInput;
+        if (!input || input.readOnly) return false;
+        const min = input.getAttribute('min');
+        const max = input.getAttribute('max');
+        if ((min && page < Number(min)) || (max && page > Number(max))) return false;
+        input.focus();
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(page));
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+        const confirm = [...region.container.querySelectorAll('button, [role="button"], a')].find((button) =>
+            /^(?:确定|确认|跳转|前往|go)$/i.test(button.textContent.trim())
+            && isPaginationElementVisible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+        if (confirm) confirm.click();
+        else {
+            for (const type of ['keydown', 'keyup']) {
+                input.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+            }
+            input.blur();
+        }
+        return true;
+    }
+
+    /** 绑定网页跳页面板；仅在展开、重新识别或提交时读取页面，不启用轮询。 */
+    function initializePageJumper(root) {
+        const input = root.querySelector('.tc-page-number');
+        const select = root.querySelector('.tc-page-region');
+        const hint = root.querySelector('.tc-page-hint');
+        let regions = [];
+        const showHint = () => {
+            const region = regions[Number(select.value) || 0];
+            const parameter = getCurrentPageParameter(location.href);
+            hint.textContent = region
+                ? `已识别网页分页${region.current ? ` · 当前第 ${region.current} 页` : ''}${region.total ? ` · 共 ${region.total} 页` : ''}`
+                : parameter ? `已识别地址页码 · 当前第 ${parameter.page} 页`
+                    : '未识别到分页；可在网页分页加载后重新识别';
+            if (region?.total) input.max = String(region.total);
+            else input.removeAttribute('max');
+        };
+        const refresh = () => {
+            const previous = regions[Number(select.value) || 0]?.container;
+            regions = collectPaginationRegions();
+            select.replaceChildren(...regions.map((region, index) => {
+                const option = document.createElement('option');
+                option.value = String(index);
+                option.textContent = `分页区域 ${index + 1}${region.current ? `（当前第 ${region.current} 页）` : ''}`;
+                return option;
+            }));
+            select.hidden = regions.length <= 1;
+            select.value = String(Math.max(0, regions.findIndex((region) => region.container === previous)));
+            showHint();
+        };
+        const jump = () => {
+            const raw = input.value.trim();
+            const page = Number(raw);
+            if (!/^\d+$/.test(raw) || !Number.isSafeInteger(page) || page < 1) {
+                hint.textContent = '请输入大于 0 的整数页码';
+                return;
+            }
+            refresh();
+            const region = regions[Number(select.value) || 0];
+            if (region?.total && page > region.total) {
+                hint.textContent = `该分页共 ${region.total} 页，请输入范围内的页码`;
+                return;
+            }
+            if (region?.current === page) {
+                hint.textContent = `当前已经是第 ${page} 页`;
+                return;
+            }
+            const exact = region?.controls.find((control) => control.page === page
+                && !control.element.disabled && control.element.getAttribute('aria-disabled') !== 'true'
+                && !control.element.closest('.disabled, .is-disabled'));
+            if (exact) {
+                hint.textContent = `已请求网页跳转到第 ${page} 页`;
+                exact.element.click();
+                return;
+            }
+            const inferred = region && inferPaginationUrl(region.samples, page, location.href);
+            if (inferred) {
+                hint.textContent = `正在跳转到第 ${page} 页`;
+                location.assign(inferred);
+                return;
+            }
+            if (region?.jumpInput && useNativePageJumper(region, page)) {
+                hint.textContent = `已向网页提交第 ${page} 页，请查看网页是否完成翻页`;
+                return;
+            }
+            // 没有可用分页组件时才采用当前 URL 的明确页码参数。
+            const parameter = !region && getCurrentPageParameter(location.href);
+            if (parameter) {
+                const url = new URL(location.href);
+                url.searchParams.set(parameter.key, String(page));
+                location.assign(url.href);
+                return;
+            }
+            hint.textContent = /(^|\.)bing\.com$/i.test(new URL(location.href).hostname)
+                ? '该搜索引擎会动态改变每页条数，请选择网页当前已显示的页码；远页无法可靠直达'
+                : '无法可靠推导该页地址；此网页目前只能跳转到已显示的页码，或使用网站自身的翻页功能';
+        };
+        select.addEventListener('change', showHint);
+        root.querySelector('[data-action="page-detect"]').addEventListener('click', refresh);
+        root.querySelector('[data-action="page-jump"]').addEventListener('click', jump);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' && !event.isComposing) {
+                event.preventDefault();
+                event.stopPropagation();
+                jump();
+            }
+        });
+        return refresh;
+    }
+
     function createShell({
         title,
         subtitle,
@@ -2081,6 +2410,16 @@
                         `}
                     <div class="tc-status" role="status"></div>
                     <div class="tc-meta"></div>
+                    <section class="tc-page-jump" aria-label="网页跳页">
+                        <label class="tc-label" for="tc-page-number">网页跳页</label>
+                        <select class="tc-select tc-page-region" aria-label="选择网页分页区域" hidden></select>
+                        <div class="tc-row">
+                            <input class="tc-input tc-page-number" id="tc-page-number" type="number" min="1" step="1" inputmode="numeric" placeholder="目标页码" aria-label="目标页码">
+                            <button class="tc-btn tc-btn-primary" type="button" data-action="page-jump">跳转</button>
+                            <button class="tc-btn" type="button" data-action="page-detect">识别</button>
+                        </div>
+                        <div class="tc-page-hint" role="status">打开面板后自动识别当前网页分页</div>
+                    </section>
                 </div>
                 <div class="tc-body tc-settings-view" hidden>
                     <div class="tc-settings-title">助手设置</div>
@@ -2219,6 +2558,7 @@
         `);
         initializeLauncherIcons(root);
         document.body.appendChild(root);
+        const refreshPageJumper = initializePageJumper(root);
 
         const launcherWrap = root.querySelector('.tc-launcher-wrap');
         const launcher = root.querySelector('.tc-launcher');
@@ -3548,6 +3888,7 @@
                 root.classList.remove('tc-speed-modal');
             }
             if (open) {
+                refreshPageJumper();
                 if (!wasOpen) ensurePanelHardClose();
                 launcherWrap.classList.remove('tc-dimmed');
                 requestAnimationFrame(positionPanel);

@@ -1,0 +1,72 @@
+// 由 pagination.test.cjs 加载，使用完整脚本创建的真实面板与浏览器 DOM。
+window.addEventListener('DOMContentLoaded', () => {
+    const result = document.querySelector('#result');
+    let checks = 0;
+    const assert = (condition, message) => {if (!condition) throw new Error(message); checks++};
+    try {
+        const root = document.querySelector('#tc-video-helper');
+        assert(root, '完整脚本应创建面板');
+        const fixtures = document.querySelector('#fixtures');
+        const input = root.querySelector('.tc-page-number');
+        const hint = root.querySelector('.tc-page-hint');
+        const refresh = () => root.querySelector('[data-action="page-detect"]').click();
+        const jump = (page) => {input.value = page; root.querySelector('[data-action="page-jump"]').click()};
+        const set = (markup, href = 'https://example.com/list') => {
+            fixtures.innerHTML = markup;
+            window.__testLocation.href = href;
+            window.__navigations.length = 0;
+            refresh();
+        };
+        set('<nav class="pagination"><span class="current">01</span><a href="/tags/topic/2/">02</a><a href="/tags/topic/3/">03</a><a href="/tags/topic/180/">最後 »</a></nav>', 'https://example.com/tags/topic/');
+        assert(input.max === '180', '从末页链接识别总页数');
+        jump('50');
+        assert(window.__navigations[0] === 'https://example.com/tags/topic/50/', '从首页直接跳第 50 页');
+        jump('181');
+        assert(window.__navigations.length === 1 && hint.textContent.includes('180'), '越界不跳转');
+        set('<div id="botstuff"><a href="/search?q=a%26b&start=10">2</a><a href="/search?q=a%26b&start=20">3</a></div>', 'https://example.com/search?q=a%26b');
+        jump('20');
+        assert(window.__navigations[0] === 'https://example.com/search?q=a%26b&start=190', '搜索结果偏移量与编码保留');
+        set('<div class="pagination"><button aria-label="Go to page 2">2</button><button>3</button></div>');
+        let clicked = 0;
+        fixtures.querySelector('button').onclick = () => clicked++;
+        jump('2');
+        assert(clicked === 1, '直接点击页面已有按钮');
+        jump('80');
+        assert(hint.textContent.includes('无法可靠') && !window.__navigations.length, '纯按钮未知远页不编造地址');
+        set('<div class="ant-pagination"><div class="ant-pagination-options-quick-jumper">跳至 <input> 页</div></div>');
+        let submitted = '';
+        fixtures.querySelector('input').addEventListener('keydown', (event) => {if (event.key === 'Enter') submitted = event.target.value});
+        jump('23');
+        assert(submitted === '23', '原生快速跳页框接收到输入和回车');
+        set('<nav class="pagination"><a href="/one/2">2</a><a href="/one/3">3</a></nav><nav class="pagination"><a href="/two/2">2</a><a href="/two/3">3</a></nav>');
+        const select = root.querySelector('.tc-page-region');
+        assert(!select.hidden && select.options.length === 2, '多个分页区域可选');
+        select.value = '1';
+        jump('30');
+        assert(window.__navigations[0] === 'https://example.com/two/30', '提交重新识别后保留所选区域');
+        set('<nav class="pagination" hidden><a href="/bad/2">2</a><a href="/bad/3">3</a></nav>');
+        assert(window.__paginationTest.collectPaginationRegions().length === 0, '忽略隐藏分页');
+        set('', 'https://example.com/list?q=book&sort=new&page=4');
+        input.value = '9';
+        input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+        assert(window.__navigations[0] === 'https://example.com/list?q=book&sort=new&page=9', 'URL 参数回退及回车提交');
+        jump('0');
+        assert(hint.textContent.includes('大于 0'), '拒绝零页码');
+        jump('2.5');
+        assert(hint.textContent.includes('整数'), '拒绝小数');
+        set('<nav class="pagination"><a href="https://other.example/2">2</a><a href="https://other.example/3">3</a></nav>');
+        assert(window.__paginationTest.collectPaginationRegions().length === 0, '不采用跨域的数字链接');
+        set('<table><tbody><tr><td><a rel="next" href="news?p=2">More</a></td></tr></tbody></table>', 'https://example.com/news');
+        jump('5');
+        assert(window.__navigations[0] === 'https://example.com/news?p=5', '只有 rel=next 的新闻首页');
+        set('<li class="b_pag"><nav role="navigation"><a class="sb_pagS">1</a><a href="/search?q=python+documentation&first=8&FORM=PERE">2</a><a href="/search?q=python+documentation&first=18&FORM=PERE1">3</a></nav></li>', 'https://www.bing.com/search?q=python+documentation');
+        jump('6');
+        assert(!window.__navigations.length && hint.textContent.includes('动态改变'), '必应不稳定分页拒绝远页推算');
+        set('<nav class="prc-Pagination-PaginationContainer-HEhGo" aria-label="Pagination"><div class="prc-Pagination-TablePaginationSteps-cAXs3"><a aria-current="page" href="/microsoft/vscode/issues?q=is%3Aissue+state%3Aopen">1</a><a href="/microsoft/vscode/issues?q=is%3Aissue+state%3Aopen&page=2">2</a><a href="/microsoft/vscode/issues?q=is%3Aissue+state%3Aopen&page=3">3</a></div></nav>', 'https://github.com/microsoft/vscode/issues');
+        jump('12');
+        assert(window.__navigations[0] === 'https://github.com/microsoft/vscode/issues?q=is%3Aissue+state%3Aopen&page=12', 'GitHub 实站嵌套分页保留筛选');
+        result.textContent = `PASS: ${checks} browser integration checks`;
+    } catch (error) {
+        result.textContent = 'FAIL: ' + error.stack;
+    }
+});
